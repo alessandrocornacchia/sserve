@@ -5,14 +5,15 @@
 # - normal QoS caps each user at 2 x A100 (8 x V100, 8 x P100) at once.
 # - A GPU under 15% utilisation for two consecutive 1 h windows gets the job
 #   cancelled: `sserve down` when done.
-# gpu_a100_80gb matches the SXM node (mcnode22) and the PCIe one (acclnode06);
-# PCIe is ~10% slower on a single card, which does not matter here.
+# gpu_sxm keeps the job off the PCIe A100s of acclnode06, whose GPUs have shown
+# odd behaviour; that leaves mcnode22 (4 x A100 80GB SXM). If it is full, try
+# :a100-40gb, or drop the constraint with -- --constraint=gpu_a100_80gb.
 #
 #SBATCH --time=10:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:a100:1
-#SBATCH --constraint=gpu_a100_80gb
+#SBATCH --constraint=gpu_a100_80gb&gpu_sxm
 
 # Under sserve the recipe dir is exported; with a plain sbatch, fall back to the deploy dir.
 exec bash --login "${SSERVE_RECIPE_DIR:-$HOME/.vllm/deploy/qwen3.6-35b-a3b-fp8}/serve.sh"

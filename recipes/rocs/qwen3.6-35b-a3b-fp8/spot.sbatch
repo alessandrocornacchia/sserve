@@ -5,6 +5,7 @@
 # reserved GPUs too. Any normal-QoS job or reservation holder can preempt it;
 # SLURM then requeues it (ROCS default): same job id, port and key, maybe
 # another node. Re-run `sserve up qwen3.6-35b-a3b-fp8:spot -d` to re-attach.
+# gpu_sxm keeps it off acclnode06 (see default.sbatch).
 #
 #SBATCH --qos=spot
 #SBATCH --signal=R:TERM@60
@@ -14,7 +15,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:a100:1
-#SBATCH --constraint=gpu_a100_80gb
+#SBATCH --constraint=gpu_a100_80gb&gpu_sxm
 
 # Under sserve the recipe dir is exported; with a plain sbatch, fall back to the deploy dir.
 exec bash --login "${SSERVE_RECIPE_DIR:-$HOME/.vllm/deploy/qwen3.6-35b-a3b-fp8}/serve.sh"

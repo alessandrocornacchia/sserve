@@ -5,12 +5,13 @@
 # over two (TP=2), leaving ~20 GB per GPU for the KV cache. The 40 GB nodes
 # (mcnode23-25, 12 GPUs) are a bigger pool than the 80 GB ones, but this takes
 # both A100s the normal QoS allows per user.
+# gpu_sxm: tensor parallel traffic is ~3x slower between PCIe A100s.
 #
 #SBATCH --time=10:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:a100:2
-#SBATCH --constraint=gpu_a100_40gb
+#SBATCH --constraint=gpu_a100_40gb&gpu_sxm
 
 export TP_SIZE=2
 

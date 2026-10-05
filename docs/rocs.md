@@ -27,9 +27,9 @@ ROCS's rule that only the head node accepts SSH.
 
 | Recipe | GPUs | QoS | Can be interrupted |
 |---|---|---|---|
-| `default` | 1 × A100 80 GB | `normal` | no |
-| `spot` | 1 × A100 80 GB, including idle reserved ones | `spot` | yes; requeued automatically |
-| `a100-40gb` | 2 × A100 40 GB, tensor parallel | `normal` | no |
+| `default` | 1 × A100 80 GB (SXM, `mcnode22`) | `normal` | no |
+| `spot` | 1 × A100 80 GB (SXM), including idle reserved ones | `spot` | yes; requeued automatically |
+| `a100-40gb` | 2 × A100 40 GB (SXM), tensor parallel | `normal` | no |
 
 ```bash
 sserve -c rocs up qwen3.6-35b-a3b-fp8              # default
@@ -75,10 +75,13 @@ done.
 - The ROCS guidelines ask for the weakest GPU that does the job. Qwen3.6-35B-A3B
   in FP8 needs about 35 GB for weights, so it needs an A100: 1 × 80 GB, or
   2 × 40 GB with tensor parallelism. V100 and P100 (16 GB) aren't an option.
-- `gpu_a100_80gb` matches both the SXM node (`mcnode22`) and the PCIe one
-  (`acclnode06`). PCIe A100s are about 10% slower per card, and much slower
-  between GPUs. Add `-- --constraint=gpu_sxm` if that matters, e.g. for
-  multi-GPU recipes.
+- **The recipes avoid `acclnode06`.** Its A100 80 GB PCIe GPUs have shown odd
+  behaviour, so every recipe asks for `gpu_sxm` as well as the GPU size. This
+  leaves `mcnode22` (4 × A100 80 GB) for `default` and `spot`, and
+  `mcnode23-25` for `a100-40gb`. SXM also matters for tensor parallelism:
+  traffic between PCIe A100s is about 3× slower. If `mcnode22` is full, use
+  `:a100-40gb`, or override the constraint with
+  `-- --constraint=gpu_a100_80gb`, which allows `acclnode06` again.
 
 ## Environment
 
