@@ -3,10 +3,14 @@
 ## Install
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/alessandrocornacchia/sserve/main/install.sh | sh
+# or, from a clone:
 git clone https://github.com/alessandrocornacchia/sserve && sserve/install.sh
 ```
 
-`install.sh` links `sserve` into `~/.local/bin` (or `$SSERVE_BIN`) and copies
+Piped from `curl`, `install.sh` first fetches the repo into `~/.local/share/sserve`
+(or `$SSERVE_HOME`) with `git` if you have it, otherwise as a tarball; running
+it again updates that copy. `SSERVE_REF` picks a branch or tag. It then links `sserve` into `~/.local/bin` (or `$SSERVE_BIN`) and copies
 `config.example.toml` to `~/.config/sserve/config.toml` (or `$SSERVE_CONFIG`)
 if you don't have a config yet. It's safe to run again: an existing config is
 never overwritten. It checks for `python3` and `ssh`, and tells you if
@@ -31,7 +35,7 @@ runs_dir = "~/.vllm/runs"            # one directory per run (default)
 
 [clusters.rocs]
 host = "mcmgt01"
-prelude = "module load slurm"        # run before every remote command, if sbatch isn't on PATH
+# prelude = "module load slurm"      # run before every remote command, if sbatch isn't on PATH
 ```
 
 `host` is an SSH destination, so put the user, key and any `ProxyJump` in

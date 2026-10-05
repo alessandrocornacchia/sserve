@@ -12,5 +12,5 @@ runs_dir = "~/.vllm/runs"            # one directory per run: logs, key, recipe 
 # recipes_dir = "~/my-recipes/orix"       # local catalogue (default: recipes/<cluster name> in the repo)
 
 [clusters.rocs]
-host = "mcmgt01"
-prelude = "module load slurm"        # shell run before every remote command, if sbatch isn't on PATH
+host = "mcmgt01"                     # ROCS head node; needs the ROCS VPN (see docs/rocs.md)
+# prelude = "module load slurm"      # shell run before every remote command, if sbatch isn't on PATH

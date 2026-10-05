@@ -27,6 +27,7 @@ Commands (see `sserve <command> -h`):
     logs     show (or follow) the SLURM logs of a deployment
     down     cancel the job and close the tunnel
     push     upload recipes/<cluster>/<label>/ to the cluster's catalogue
+    config   show where sserve is installed and the configuration it resolved
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ import json
 import os
 import secrets
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -117,6 +119,12 @@ class Cluster:
     prelude: str = ""                       # shell run before every remote script, e.g. "module load slurm"
     sbatch_args: list[str] = field(default_factory=list)
     recipes_dir: str = ""                   # local catalogue (default: recipes/<cluster name> next to this script)
+    implicit: bool = False                  # picked without -c, so printed commands can omit it
+
+    @property
+    def cli(self) -> str:
+        """How to invoke sserve for this cluster, for commands printed to the user."""
+        return PROG if self.implicit else f"{PROG} -c {shlex.quote(self.name)}"
 
     @property
     def local_recipes(self) -> Path:
@@ -136,15 +144,16 @@ def load_config() -> dict:
 
 def resolve_cluster(name: str | None) -> Cluster:
     cfg = load_config()
-    name = name or os.environ.get("SSERVE_CLUSTER") or cfg.get("default")
+    fallback = os.environ.get("SSERVE_CLUSTER") or cfg.get("default")
+    name = name or fallback
     if not name:
         die(f"no cluster given: pass -c HOST, set SSERVE_CLUSTER, or set `default` in {CONFIG_PATH}")
     entry = cfg.get("clusters", {}).get(name)
     if entry is None:
-        return Cluster(name=name, host=name)  # a bare ssh host works without any config
-    known = {k: v for k, v in entry.items() if k in Cluster.__dataclass_fields__}
+        return Cluster(name=name, host=name, implicit=name == fallback)  # a bare ssh host works without any config
+    known = {k: v for k, v in entry.items() if k in Cluster.__dataclass_fields__ and k != "implicit"}
     known.setdefault("host", name)
-    return Cluster(name=name, **known)
+    return Cluster(name=name, implicit=name == fallback, **known)
 
 
 def parse_target(target: str, recipe: str | None) -> tuple[str, str]:
@@ -359,7 +368,7 @@ def show_logs(cl: Cluster, dep: Deployment, n: int = 40) -> None:
     for line in out.splitlines():
         print(f"    {line}", file=sys.stderr)
     if "address already in use" in out.lower():
-        warn(f"port {dep.port} was taken on the node; `{PROG} up` again picks another one")
+        warn(f"port {dep.port} was taken on the node; `{cl.cli} up` again picks another one")
 
 
 def wait_ready(cl: Cluster, dep: Deployment, timeout: float) -> None:
@@ -381,7 +390,7 @@ def wait_ready(cl: Cluster, dep: Deployment, timeout: float) -> None:
             last = now
         if time.monotonic() > deadline:
             show_logs(cl, dep)
-            die(f"vLLM not ready after {timeout / 60:.0f} min (job {dep.job_id} left running; `{PROG} down` to stop it)")
+            die(f"vLLM not ready after {timeout / 60:.0f} min (job {dep.job_id} left running; `{cl.cli} down {dep.label}` to stop it)")
         time.sleep(POLL_S)
 
 
@@ -498,7 +507,7 @@ def cmd_ls(cl: Cluster, a: argparse.Namespace) -> None:
         print(f"{names[k]:<{width}}  {f'[{flag}] ' if flag else ''}{desc}")
     if any(sync(k) in ("not pushed", "differs") for k in keys):
         sys.stdout.flush()
-        print(f"\n`{PROG} push` uploads {cl.local_recipes}", file=sys.stderr)
+        print(f"\n`{cl.cli} push` uploads {cl.local_recipes}", file=sys.stderr)
 
 
 def cmd_up(cl: Cluster, a: argparse.Namespace) -> None:
@@ -506,7 +515,7 @@ def cmd_up(cl: Cluster, a: argparse.Namespace) -> None:
 
     dep = find_running(cl, label)
     if dep and dep.recipe != recipe:
-        die(f"{label} is already running recipe '{dep.recipe}' (job {dep.job_id}); `{PROG} down {label}` first")
+        die(f"{label} is already running recipe '{dep.recipe}' (job {dep.job_id}); `{cl.cli} down {label}` first")
     if dep:
         cached = load_state(cl.name, label)
         if cached and cached.job_id == dep.job_id:
@@ -540,11 +549,11 @@ def cmd_up(cl: Cluster, a: argparse.Namespace) -> None:
     print(f"\n{label}:{dep.recipe} is up on {dep.node} (job {dep.job_id})", file=sys.stderr)
     print(f"  base url : {dep.base_url}", file=sys.stderr)
     print(f"  model    : {', '.join(dep.served_models) or '?'}", file=sys.stderr)
-    print(f"  env      : eval \"$({PROG} env {label})\"   or   {_state_path(cl.name, label).with_suffix('.env')}",
+    print(f"  env      : eval \"$({cl.cli} env {label})\"   or   {_state_path(cl.name, label).with_suffix('.env')}",
           file=sys.stderr)
 
     if a.detach:
-        print(f"  stop     : {PROG} down {label}\n", file=sys.stderr)
+        print(f"  stop     : {cl.cli} down {label}\n", file=sys.stderr)
         return
 
     what = "cancel the job and close the tunnel" if owned else "close the tunnel (the job keeps running)"
@@ -575,9 +584,9 @@ def hold(cl: Cluster, dep: Deployment) -> None:
 def cmd_env(cl: Cluster, a: argparse.Namespace) -> None:
     dep = load_state(cl.name, parse_target(a.target, None)[0])
     if dep is None:
-        die(f"no local deployment of {a.target} on {cl.name}; run `{PROG} up {a.target}`")
+        die(f"no local deployment of {a.target} on {cl.name}; run `{cl.cli} up {a.target}`")
     if not tunnel_alive(cl, dep):
-        warn(f"the tunnel is down; `{PROG} up {dep.label} --detach` reopens it")
+        warn(f"the tunnel is down; `{cl.cli} up {dep.label} --detach` reopens it")
     sys.stdout.write(env_lines(dep))
     if not sys.stdout.isatty():  # captured by `eval "$(...)"`, so the exports themselves are invisible
         names = "OPENAI_BASE_URL, OPENAI_API_KEY" + (", SSERVE_MODEL" if dep.served_models else "")
@@ -597,7 +606,7 @@ def cmd_status(cl: Cluster, a: argparse.Namespace) -> None:
         where = node if state == "RUNNING" else reason
         print(f"{job_id:<10} {name[len(JOB_PREFIX):]:<28} {state:<10} {where:<22} {left:<11} {tunnel}")
     for dep in local.values():  # job is gone, the local record is stale
-        print(f"{dep.job_id:<10} {dep.label:<28} {'GONE':<10} {'':<22} {'':<11} (run `{PROG} down {dep.label}`)")
+        print(f"{dep.job_id:<10} {dep.label:<28} {'GONE':<10} {'':<22} {'':<11} (run `{cl.cli} down {dep.label}`)")
 
 
 def cmd_logs(cl: Cluster, a: argparse.Namespace) -> None:
@@ -662,6 +671,64 @@ def push_dir(cl: Cluster, src: Path, label: str) -> None:
     remote(cl, f"SSERVE_TAR={payload}\n" + PUSH_SH, cl.deploy_dir, label)
 
 
+def _version(repo: Path) -> str:
+    if not (repo / ".git").exists():
+        return "unknown (not a git checkout)"
+    p = subprocess.run(["git", "-C", str(repo), "describe", "--always", "--dirty", "--tags"],
+                       capture_output=True, text=True)
+    b = subprocess.run(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+                       capture_output=True, text=True)
+    return f"{p.stdout.strip()} ({b.stdout.strip()})" if p.returncode == 0 else "unknown"
+
+
+def cmd_config(a: argparse.Namespace) -> None:
+    """Needs no cluster and no ssh: only what this machine knows."""
+    script = Path(__file__).resolve()
+    on_path = shutil.which(PROG)
+    cfg = load_config()
+    env_cluster = os.environ.get("SSERVE_CLUSTER")
+    default = env_cluster or cfg.get("default")
+    py = sys.version.split()[0]
+
+    def row(key: str, val: object) -> None:
+        print(f"  {key:<12} {val}")
+
+    print(PROG)
+    row("script", script)
+    row("version", _version(script.parent))
+    if on_path:
+        link = Path(on_path)
+        row("on PATH", f"{link} -> {link.resolve()}" if link.is_symlink() else link)
+    else:
+        row("on PATH", "no (run install.sh, or add its bin dir to PATH)")
+    row("python", f"{py} ({sys.executable})" + ("" if tomllib else "  [config needs >= 3.11]"))
+    row("config", f"{CONFIG_PATH}" + ("" if CONFIG_PATH.exists() else "  (missing: built-in defaults)"))
+    row("state", STATE_DIR)
+    row("sockets", SOCK_DIR)
+    row("default", f"{default} (from {'$SSERVE_CLUSTER' if env_cluster else 'config'})" if default else "none")
+
+    clusters = cfg.get("clusters", {})
+    if default and default not in clusters:
+        clusters = {**clusters, default: {}}
+    for name, entry in clusters.items():
+        unknown = sorted(set(entry) - set(Cluster.__dataclass_fields__) - {"implicit"})
+        cl = resolve_cluster(name)
+        n = len(list(cl.local_recipes.glob("*/*.sbatch")))
+        print(f"\ncluster {name}" + ("  (default)" if name == default else ""))
+        row("host", cl.host)
+        row("deploy_dir", cl.deploy_dir)
+        row("runs_dir", cl.runs_dir)
+        if cl.prelude:
+            row("prelude", cl.prelude)
+        if cl.sbatch_args:
+            row("sbatch_args", " ".join(cl.sbatch_args))
+        row("recipes", f"{cl.local_recipes} ({n} recipe{'s' * (n != 1)})" if n else f"{cl.local_recipes} (none)")
+        for dep in all_states(name):
+            row("deployed", f"{dep.label}:{dep.recipe} job {dep.job_id} -> {dep.base_url}")
+        if unknown:
+            warn(f"[clusters.{name}] ignores unknown keys: {', '.join(unknown)}")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -714,6 +781,9 @@ def main(argv: list[str]) -> int:
     ps.add_argument("targets", nargs="*", metavar="LABEL|DIR")
     ps.add_argument("--label", help="remote label for a single directory (default: its name)")
 
+    cf = sub.add_parser("config", help="show install location and resolved configuration")
+    cf.add_argument("action", nargs="?", choices=["show"], default="show")
+
     a = ap.parse_args(argv)
     a.sbatch_args = sbatch_args
     if sbatch_args and a.cmd != "up":
@@ -728,6 +798,8 @@ def main(argv: list[str]) -> int:
     signal.signal(signal.SIGHUP, _interrupt)
 
     try:
+        if a.cmd == "config":
+            return cmd_config(a) or 0
         cl = resolve_cluster(a.cluster)
         {"ls": cmd_ls, "up": cmd_up, "env": cmd_env, "status": cmd_status,
          "logs": cmd_logs, "down": cmd_down, "push": cmd_push}[a.cmd](cl, a)
