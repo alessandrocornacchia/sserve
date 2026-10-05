@@ -44,9 +44,8 @@ $ eval "$(sserve env deepseek-v4-flash)"     # OPENAI_BASE_URL, OPENAI_API_KEY, 
 ## Quick start
 
 ```bash
-# 1. Install: needs python3 and ssh on your machine
-ln -s "$PWD/sserve" ~/.local/bin/sserve
-mkdir -p ~/.config/sserve && cp config.example.toml ~/.config/sserve/config.toml   # set your host
+# 1. Install
+git clone https://github.com/alessandrocornacchia/sserve && sserve/install.sh
 
 # 2. See what you can run
 sserve ls
@@ -54,6 +53,9 @@ sserve ls
 # 3. Start a model and use it
 sserve up deepseek-v4-flash
 ```
+
+The starter config expects an `orix` alias in `~/.ssh/config`. See
+[configuration](docs/configuration.md) to add other clusters.
 
 Then, from any OpenAI client:
 

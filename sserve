@@ -579,6 +579,9 @@ def cmd_env(cl: Cluster, a: argparse.Namespace) -> None:
     if not tunnel_alive(cl, dep):
         warn(f"the tunnel is down; `{PROG} up {dep.label} --detach` reopens it")
     sys.stdout.write(env_lines(dep))
+    if not sys.stdout.isatty():  # captured by `eval "$(...)"`, so the exports themselves are invisible
+        names = "OPENAI_BASE_URL, OPENAI_API_KEY" + (", SSERVE_MODEL" if dep.served_models else "")
+        log(f"exported {names} for {dep.label}:{dep.recipe} ({dep.base_url})")
 
 
 def cmd_status(cl: Cluster, a: argparse.Namespace) -> None:
