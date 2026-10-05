@@ -1,0 +1,16 @@
+# Copy to ~/.config/sserve/config.toml (needs Python >= 3.11 to read).
+# Without a config file, `sserve -c <ssh host>` works with the defaults below.
+# Each cluster's name is also its recipe folder: [clusters.orix] -> recipes/orix/.
+
+default = "orix"
+
+[clusters.orix]
+host = "orix"                        # ssh destination; put user/ProxyJump in ~/.ssh/config
+deploy_dir = "~/.vllm/deploy"        # <label>/<recipe>.sbatch catalogue (default)
+runs_dir = "~/.vllm/runs"            # one directory per run: logs, key, recipe snapshot (default)
+# sbatch_args = ["--account=myproject"]   # added to every submission on this cluster
+# recipes_dir = "~/my-recipes/orix"       # local catalogue (default: recipes/<cluster name> in the repo)
+
+[clusters.mcm]
+host = "mcmgt01"
+prelude = "module load slurm"        # shell run before every remote command, if sbatch isn't on PATH

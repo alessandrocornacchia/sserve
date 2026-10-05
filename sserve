@@ -1,0 +1,739 @@
+#!/usr/bin/env python3
+"""sserve: serve a vetted vLLM recipe on a SLURM cluster and tunnel it to localhost.
+
+    this machine ──ssh──► login node ──sbatch──► compute node: vLLM :$VLLM_PORT
+         ▲                    │
+         └── ssh -L tunnel ───┘   http://127.0.0.1:<local port>/v1
+
+The cluster keeps a small catalogue of models that are known to deploy:
+
+    ~/.vllm/deploy/<label>/default.sbatch     the recipe `sserve up <label>` runs
+    ~/.vllm/deploy/<label>/<variant>.sbatch   `sserve up <label>:<variant>`
+
+Nothing runs on the login node apart from sshd forwarding the tunnel, and no
+one logs into a compute node: the login node polls /health with curl, and the
+tunnel is a plain `ssh -L` through it.
+
+Each run gets its own directory on the cluster (~/.vllm/runs/<run id>/) with
+the recipe snapshot, the SLURM logs, and a fresh API key (mode 600). Run
+directories are discoverable from the job's work dir, so `sserve up` on another
+machine re-attaches to a running deployment instead of starting a second one.
+
+Commands (see `sserve <command> -h`):
+    ls       list the cluster's recipes, and whether they match the local copies
+    up       submit a recipe (or attach to a running one), wait, open the tunnel
+    env      print OPENAI_BASE_URL / OPENAI_API_KEY for a running deployment
+    status   show sserve jobs on the cluster and local tunnels
+    logs     show (or follow) the SLURM logs of a deployment
+    down     cancel the job and close the tunnel
+    push     upload recipes/<cluster>/<label>/ to the cluster's catalogue
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import io
+import json
+import os
+import secrets
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.error
+import urllib.request
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+try:
+    import tomllib
+except ImportError:  # Python < 3.11
+    tomllib = None
+
+PROG = "sserve"
+CONFIG_PATH = Path(os.environ.get("SSERVE_CONFIG", "~/.config/sserve/config.toml")).expanduser()
+STATE_DIR = Path(os.environ.get("SSERVE_STATE", "~/.local/state/sserve")).expanduser()
+SOCK_DIR = Path("~/.cache/sserve").expanduser()  # unix socket paths must stay short
+
+DEFAULT_RECIPE = "default"
+JOB_PREFIX = "sserve-"
+PORT_RANGE = (20000, 30000)          # vLLM port on the compute node, picked per run
+LOCAL_PORTS = range(8000, 8100)      # first free one is the local end of the tunnel
+POLL_S = 15
+ACTIVE = ("PENDING", "CONFIGURING", "RUNNING")
+
+SSH_BASE = [
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=15",
+    "-o", "ServerAliveInterval=30",
+    "-o", "ServerAliveCountMax=3",
+]
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+_COLOR = sys.stderr.isatty() and "NO_COLOR" not in os.environ
+
+
+def _say(color: str, tag: str, msg: str) -> None:
+    stamp = datetime.now().strftime("%H:%M:%S")
+    head = f"[{stamp}]{tag}"
+    if _COLOR:
+        head = f"\033[{color}m{head}\033[0m"
+    print(f"{head} {msg}", file=sys.stderr, flush=True)
+
+
+def log(msg: str) -> None:
+    _say("1;34", "", msg)
+
+
+def warn(msg: str) -> None:
+    _say("1;33", " WARN", msg)
+
+
+class Die(Exception):
+    pass
+
+
+def die(msg: str) -> None:
+    raise Die(msg)
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+@dataclass
+class Cluster:
+    name: str
+    host: str                               # ssh destination (an alias in ~/.ssh/config)
+    deploy_dir: str = "~/.vllm/deploy"
+    runs_dir: str = "~/.vllm/runs"
+    prelude: str = ""                       # shell run before every remote script, e.g. "module load slurm"
+    sbatch_args: list[str] = field(default_factory=list)
+    recipes_dir: str = ""                   # local catalogue (default: recipes/<cluster name> next to this script)
+
+    @property
+    def local_recipes(self) -> Path:
+        if self.recipes_dir:
+            return Path(self.recipes_dir).expanduser()
+        return Path(__file__).resolve().parent / "recipes" / self.name
+
+
+def load_config() -> dict:
+    if not CONFIG_PATH.exists():
+        return {}
+    if tomllib is None:
+        die(f"{CONFIG_PATH} needs Python >= 3.11 to read (try: pixi global install python)")
+    with CONFIG_PATH.open("rb") as f:
+        return tomllib.load(f)
+
+
+def resolve_cluster(name: str | None) -> Cluster:
+    cfg = load_config()
+    name = name or os.environ.get("SSERVE_CLUSTER") or cfg.get("default")
+    if not name:
+        die(f"no cluster given: pass -c HOST, set SSERVE_CLUSTER, or set `default` in {CONFIG_PATH}")
+    entry = cfg.get("clusters", {}).get(name)
+    if entry is None:
+        return Cluster(name=name, host=name)  # a bare ssh host works without any config
+    known = {k: v for k, v in entry.items() if k in Cluster.__dataclass_fields__}
+    known.setdefault("host", name)
+    return Cluster(name=name, **known)
+
+
+def parse_target(target: str, recipe: str | None) -> tuple[str, str]:
+    label, _, variant = target.partition(":")
+    if variant and recipe and variant != recipe:
+        die(f"recipe given twice: '{target}' and --recipe {recipe}")
+    return label, recipe or variant or DEFAULT_RECIPE
+
+
+# ---------------------------------------------------------------------------
+# Remote execution (every call reuses one multiplexed ssh connection)
+# ---------------------------------------------------------------------------
+def _mux_opts() -> list[str]:
+    SOCK_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return ["-o", "ControlMaster=auto", "-o", f"ControlPath={SOCK_DIR}/m-%C", "-o", "ControlPersist=10m"]
+
+
+def remote(cl: Cluster, script: str, *args: str, check: bool = True, timeout: float = 120) -> str:
+    """Run a bash script on the login node. The script goes over stdin, so
+    anything secret in it never appears in a process list."""
+    cmd = ["ssh", *SSH_BASE, *_mux_opts(), cl.host, "bash -s -- " + " ".join(shlex.quote(a) for a in args)]
+    body = (cl.prelude + "\n" if cl.prelude else "") + script
+    try:
+        p = subprocess.run(cmd, input=body.encode(), capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        die(f"ssh {cl.host} timed out after {timeout:.0f}s")
+    out, err = p.stdout.decode(errors="replace"), p.stderr.decode(errors="replace").strip()
+    if check and p.returncode != 0:
+        if p.returncode == 255:
+            die(f"cannot ssh to {cl.host}: {err or 'connection failed'} (check ~/.ssh/config and your agent)")
+        die(err or f"remote command failed with exit code {p.returncode}")
+    return out
+
+
+# Remote paths may start with "~": expand it against the remote $HOME.
+_EXPAND = 'x() { case "$1" in "~"|"~/"*) printf %s "$HOME${1#\\~}";; *) printf %s "$1";; esac; }\n'
+
+LIST_SH = _EXPAND + r'''
+d=$(x "$1")
+[ -d "$d" ] || exit 0
+for f in "$d"/*/*.sbatch; do
+    [ -e "$f" ] || continue
+    desc=$(grep -m1 '^# sserve:' "$f" | sed 's/^# sserve:[[:space:]]*//')
+    sum=$(sha256sum "$f" | cut -c1-64)
+    printf '%s\t%s\t%s\t%s\n' "$(basename "$(dirname "$f")")" "$(basename "$f" .sbatch)" "$sum" "$desc"
+done
+'''
+
+SUBMIT_SH = _EXPAND + r'''
+set -euo pipefail
+deploy=$(x "$1"); runs=$(x "$2"); label=$3; recipe=$4; run_id=$5; port=$6; shift 6
+src="$deploy/$label/$recipe.sbatch"
+[ -f "$src" ] || { echo "no recipe $label:$recipe (looked for $src)" >&2; exit 3; }
+run="$runs/$run_id"
+mkdir -p "$run" && chmod 700 "$run"
+cp "$src" "$run/recipe.sbatch"
+(umask 077; printf '%s\n' "$SSERVE_KEY" > "$run/api_key")
+printf 'LABEL=%s\nRECIPE=%s\nPORT=%s\n' "$label" "$recipe" "$port" > "$run/sserve.env"
+cd "$run"
+env -u SSERVE_KEY \
+    VLLM_PORT="$port" SSERVE_KEY_FILE="$run/api_key" SSERVE_RUN_DIR="$run" \
+    SSERVE_LABEL="$label" SSERVE_RECIPE_DIR="$deploy/$label" \
+    sbatch --parsable --export=ALL --job-name="SSERVE_PREFIX$label" --chdir="$run" \
+        --output="$run/slurm-%j.out" --error="$run/slurm-%j.err" "$@" "$run/recipe.sbatch" | cut -d';' -f1
+printf '%s\n' "$run"
+'''.replace("SSERVE_PREFIX", JOB_PREFIX)
+
+FIND_SH = r'''
+squeue -h -u "$USER" -n "$1" -t PENDING,CONFIGURING,RUNNING -o '%i|%Z' | while IFS='|' read -r id wd; do
+    [ -f "$wd/sserve.env" ] || continue
+    . "$wd/sserve.env"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$wd" "$RECIPE" "$PORT" "$(cat "$wd/api_key" 2>/dev/null)"
+done
+'''
+
+POLL_SH = r'''
+st=$(squeue -h -j "$1" -o '%T|%N|%r' 2>/dev/null || true)
+[ -n "$st" ] || st="$(sacct -n -X -P -j "$1" -o State 2>/dev/null | head -1 | cut -d' ' -f1)||"
+state=${st%%|*}; rest=${st#*|}; nodes=${rest%%|*}; reason=${rest#*|}
+node=""; code=000
+if [ "$state" = RUNNING ] && [ -n "$nodes" ]; then
+    node=$(scontrol show hostnames "$nodes" | head -1)
+    code=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://$node:$2/health" || true)
+fi
+printf '%s\t%s\t%s\t%s\n' "${state:-UNKNOWN}" "$node" "${code:-000}" "$reason"
+'''
+
+STATUS_SH = r'''
+squeue -h -u "$USER" -o '%i|%j|%T|%N|%M|%L|%r' | grep "|$1" || true
+'''
+
+PUSH_SH = _EXPAND + r'''
+set -euo pipefail
+d="$(x "$1")/$2"
+mkdir -p "$d" && printf %s "$SSERVE_TAR" | base64 -d | tar -C "$d" -xf -
+'''
+
+TAIL_SH = r'''
+n=$1; shift
+for f in "$@"; do [ -f "$f" ] && { echo "==> $f <=="; tail -n "$n" "$f"; }; done
+'''
+
+
+# ---------------------------------------------------------------------------
+# Local state (one deployment per cluster + label)
+# ---------------------------------------------------------------------------
+@dataclass
+class Deployment:
+    cluster: str
+    label: str
+    recipe: str
+    job_id: str
+    run_dir: str
+    port: int
+    api_key: str
+    node: str = ""
+    local_port: int = 0
+    bind: str = "127.0.0.1"
+    served_models: list[str] = field(default_factory=list)
+    submitted_here: bool = False
+
+    @property
+    def base_url(self) -> str:
+        host = "127.0.0.1" if self.bind in ("0.0.0.0", "127.0.0.1") else self.bind
+        return f"http://{host}:{self.local_port}/v1"
+
+    @property
+    def sock(self) -> Path:
+        digest = hashlib.sha1(f"{self.cluster}/{self.label}".encode()).hexdigest()[:12]
+        return SOCK_DIR / f"t-{digest}"
+
+    def logs(self) -> list[str]:
+        return [f"{self.run_dir}/slurm-{self.job_id}.{ext}" for ext in ("out", "err")]
+
+
+def _state_path(cluster: str, label: str) -> Path:
+    return STATE_DIR / cluster / f"{label}.json"
+
+
+def save_state(dep: Deployment) -> None:
+    path = _state_path(dep.cluster, dep.label)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # holds the API key
+    with os.fdopen(fd, "w") as f:
+        json.dump(asdict(dep), f, indent=2)
+    env = path.with_suffix(".env")
+    fd = os.open(env, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(env_lines(dep, export=False))
+
+
+def load_state(cluster: str, label: str) -> Deployment | None:
+    path = _state_path(cluster, label)
+    if not path.exists():
+        return None
+    return Deployment(**json.loads(path.read_text()))
+
+
+def drop_state(cluster: str, label: str) -> None:
+    for suffix in (".json", ".env"):
+        _state_path(cluster, label).with_suffix(suffix).unlink(missing_ok=True)
+
+
+def all_states(cluster: str) -> list[Deployment]:
+    d = STATE_DIR / cluster
+    return [Deployment(**json.loads(p.read_text())) for p in sorted(d.glob("*.json"))] if d.is_dir() else []
+
+
+def env_lines(dep: Deployment, export: bool = True) -> str:
+    pre = "export " if export else ""
+    lines = [
+        f"{pre}OPENAI_BASE_URL={shlex.quote(dep.base_url)}",
+        f"{pre}OPENAI_API_KEY={shlex.quote(dep.api_key)}",
+    ]
+    if dep.served_models:
+        lines.append(f"{pre}SSERVE_MODEL={shlex.quote(dep.served_models[0])}")
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# SLURM job lifecycle
+# ---------------------------------------------------------------------------
+def find_running(cl: Cluster, label: str) -> Deployment | None:
+    rows = [r.split("\t") for r in remote(cl, FIND_SH, JOB_PREFIX + label).splitlines() if r.strip()]
+    if not rows:
+        return None
+    if len(rows) > 1:
+        warn(f"{len(rows)} active jobs for {label}: {', '.join(r[0] for r in rows)}; using {rows[0][0]}")
+    job_id, run_dir, recipe, port, key = rows[0]
+    return Deployment(cl.name, label, recipe, job_id, run_dir, int(port), key)
+
+
+def submit(cl: Cluster, label: str, recipe: str, extra: list[str]) -> Deployment:
+    run_id = f"{label}-{recipe}-{datetime.now():%Y%m%d-%H%M%S}"
+    port = secrets.randbelow(PORT_RANGE[1] - PORT_RANGE[0]) + PORT_RANGE[0]
+    key = secrets.token_hex(24)
+    script = f"SSERVE_KEY={key}\n" + SUBMIT_SH  # via stdin, never on a command line
+    out = remote(cl, script, cl.deploy_dir, cl.runs_dir, label, recipe, run_id, str(port),
+                 *cl.sbatch_args, *extra).split()
+    if len(out) < 2 or not out[0].isdigit():
+        die(f"could not parse sbatch output: {' '.join(out)!r}")
+    return Deployment(cl.name, label, recipe, out[0], out[1], port, key, submitted_here=True)
+
+
+def poll(cl: Cluster, dep: Deployment) -> tuple[str, str, str, str]:
+    row = remote(cl, POLL_SH, dep.job_id, str(dep.port)).rstrip("\n").split("\t")
+    return tuple((row + ["", "", "", ""])[:4])  # state, node, http code, reason
+
+
+def show_logs(cl: Cluster, dep: Deployment, n: int = 40) -> None:
+    out = remote(cl, TAIL_SH, str(n), *dep.logs(), check=False)
+    for line in out.splitlines():
+        print(f"    {line}", file=sys.stderr)
+    if "address already in use" in out.lower():
+        warn(f"port {dep.port} was taken on the node; `{PROG} up` again picks another one")
+
+
+def wait_ready(cl: Cluster, dep: Deployment, timeout: float) -> None:
+    log(f"waiting up to {timeout / 60:.0f} min for job {dep.job_id} to serve /health")
+    deadline, last = time.monotonic() + timeout, None
+    while True:
+        state, node, code, reason = poll(cl, dep)
+        if state == "RUNNING" and code == "200":
+            dep.node = node
+            log(f"vLLM is healthy on {node}:{dep.port}")
+            return
+        if state not in ACTIVE:
+            show_logs(cl, dep)
+            die(f"job {dep.job_id} ended in state {state} before vLLM was ready")
+        now = (state, reason if state == "PENDING" else node)
+        if now != last:
+            detail = f"reason: {reason}" if state == "PENDING" else f"on {node}, loading the model"
+            log(f"job {dep.job_id} {state} ({detail})")
+            last = now
+        if time.monotonic() > deadline:
+            show_logs(cl, dep)
+            die(f"vLLM not ready after {timeout / 60:.0f} min (job {dep.job_id} left running; `{PROG} down` to stop it)")
+        time.sleep(POLL_S)
+
+
+def cancel(cl: Cluster, dep: Deployment) -> None:
+    log(f"cancelling job {dep.job_id}")
+    remote(cl, 'scancel "$1"; rm -f "$2/api_key"', dep.job_id, dep.run_dir, check=False)
+
+
+# ---------------------------------------------------------------------------
+# Tunnel: a dedicated ssh master per deployment, so it can outlive this process
+# ---------------------------------------------------------------------------
+def tunnel_alive(cl: Cluster, dep: Deployment) -> bool:
+    if not dep.sock.exists():
+        return False
+    return subprocess.run(["ssh", "-S", str(dep.sock), "-O", "check", cl.host],
+                          capture_output=True).returncode == 0
+
+
+def free_port(bind: str, wanted: int = 0) -> int:
+    for p in ([wanted] if wanted else LOCAL_PORTS):
+        with socket.socket() as s:
+            try:
+                s.bind((bind, p))
+                return p
+            except OSError:
+                continue
+    die(f"local port {wanted} is busy" if wanted else f"no free local port in {LOCAL_PORTS.start}-{LOCAL_PORTS.stop - 1}")
+
+
+def open_tunnel(cl: Cluster, dep: Deployment) -> None:
+    if tunnel_alive(cl, dep):
+        return
+    dep.sock.unlink(missing_ok=True)  # stale socket from a crashed master
+    dep.local_port = free_port(dep.bind, dep.local_port)
+    fwd = f"{dep.bind}:{dep.local_port}:{dep.node}:{dep.port}"
+    log(f"tunnel {dep.bind}:{dep.local_port} -> {dep.node}:{dep.port} via {cl.host}")
+    p = subprocess.run(["ssh", *SSH_BASE, "-o", "ExitOnForwardFailure=yes",
+                        "-M", "-S", str(dep.sock), "-f", "-N", "-L", fwd, cl.host],
+                       capture_output=True, timeout=60)
+    if p.returncode != 0:
+        die(f"could not open the tunnel: {p.stderr.decode(errors='replace').strip()}")
+
+
+def close_tunnel(cl: Cluster, dep: Deployment) -> None:
+    if tunnel_alive(cl, dep):
+        log(f"closing tunnel on port {dep.local_port}")
+        subprocess.run(["ssh", "-S", str(dep.sock), "-O", "exit", cl.host], capture_output=True)
+    dep.sock.unlink(missing_ok=True)
+
+
+def verify(dep: Deployment) -> None:
+    """Hit /v1/models through the tunnel with the key: proves the path and the auth."""
+    req = urllib.request.Request(f"{dep.base_url}/models", headers={"Authorization": f"Bearer {dep.api_key}"})
+    for attempt in range(10):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                dep.served_models = [m["id"] for m in json.load(r).get("data", [])]
+            try:
+                urllib.request.urlopen(f"{dep.base_url}/models", timeout=10).close()
+                warn("the endpoint answers WITHOUT a key: the recipe should export VLLM_API_KEY from $SSERVE_KEY_FILE")
+            except urllib.error.HTTPError:
+                pass  # 401 as expected
+            return
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                die("the server rejected the key: does the recipe export VLLM_API_KEY from $SSERVE_KEY_FILE?")
+            err = e
+        except OSError as e:
+            err = e
+        time.sleep(2)
+    die(f"{dep.base_url}/models does not answer through the tunnel: {err}")
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+def local_catalogue(cl: Cluster) -> dict[tuple[str, str], tuple[str, str]]:
+    """(label, recipe) -> (sha256, description) for recipes/<cluster>/<label>/*.sbatch."""
+    out = {}
+    for f in sorted(cl.local_recipes.glob("*/*.sbatch")):
+        text = f.read_bytes()
+        desc = next((ln[len("# sserve:"):].strip() for ln in text.decode(errors="replace").splitlines()
+                     if ln.startswith("# sserve:")), "")
+        out[(f.parent.name, f.stem)] = (hashlib.sha256(text).hexdigest(), desc)
+    return out
+
+
+def cmd_ls(cl: Cluster, a: argparse.Namespace) -> None:
+    remote_rows = {}
+    for row in remote(cl, LIST_SH, cl.deploy_dir).splitlines():
+        if row.strip():
+            label, recipe, digest, desc = (row.split("\t") + [""])[:4]
+            remote_rows[(label, recipe)] = (digest, desc)
+    local = local_catalogue(cl)
+    if not remote_rows and not local:
+        print(f"no recipes on {cl.host}:{cl.deploy_dir} nor in {cl.local_recipes}")
+        return
+
+    def sync(key):
+        if not local:
+            return ""                   # no local catalogue for this cluster: nothing to compare
+        if key not in local:
+            return "remote only"
+        if key not in remote_rows:
+            return "not pushed"
+        return "" if local[key][0] == remote_rows[key][0] else "differs"
+
+    keys = sorted(set(remote_rows) | set(local), key=lambda k: (k[0], k[1] != DEFAULT_RECIPE, k[1]))
+    names = {k: k[0] if k[1] == DEFAULT_RECIPE else f"{k[0]}:{k[1]}" for k in keys}
+    width = max(map(len, names.values()))
+    for k in keys:
+        desc = (remote_rows.get(k) or local[k])[1]
+        flag = sync(k)
+        print(f"{names[k]:<{width}}  {f'[{flag}] ' if flag else ''}{desc}")
+    if any(sync(k) in ("not pushed", "differs") for k in keys):
+        sys.stdout.flush()
+        print(f"\n`{PROG} push` uploads {cl.local_recipes}", file=sys.stderr)
+
+
+def cmd_up(cl: Cluster, a: argparse.Namespace) -> None:
+    label, recipe = parse_target(a.target, a.recipe)
+
+    dep = find_running(cl, label)
+    if dep and dep.recipe != recipe:
+        die(f"{label} is already running recipe '{dep.recipe}' (job {dep.job_id}); `{PROG} down {label}` first")
+    if dep:
+        cached = load_state(cl.name, label)
+        if cached and cached.job_id == dep.job_id:
+            dep = cached  # keep local port and served model across re-attaches
+        log(f"attaching to running job {dep.job_id} ({label}:{dep.recipe})")
+    elif a.dry_run:
+        print(f"would submit {cl.host}:{cl.deploy_dir}/{label}/{recipe}.sbatch "
+              f"with sbatch {' '.join(cl.sbatch_args + a.sbatch_args)}")
+        return
+    else:
+        log(f"submitting {label}:{recipe} on {cl.host}")
+        dep = submit(cl, label, recipe, a.sbatch_args)
+        log(f"job {dep.job_id}, run dir {cl.host}:{dep.run_dir}")
+
+    if a.local_port:
+        dep.local_port = a.local_port
+    dep.bind = a.bind
+    owned = dep.submitted_here and not a.keep_job
+
+    try:
+        wait_ready(cl, dep, a.ready_timeout)
+        open_tunnel(cl, dep)
+        verify(dep)
+        save_state(dep)
+    except (KeyboardInterrupt, Die):
+        if owned:
+            cancel(cl, dep)
+        close_tunnel(cl, dep)
+        raise
+
+    print(f"\n{label}:{dep.recipe} is up on {dep.node} (job {dep.job_id})", file=sys.stderr)
+    print(f"  base url : {dep.base_url}", file=sys.stderr)
+    print(f"  model    : {', '.join(dep.served_models) or '?'}", file=sys.stderr)
+    print(f"  env      : eval \"$({PROG} env {label})\"   or   {_state_path(cl.name, label).with_suffix('.env')}",
+          file=sys.stderr)
+
+    if a.detach:
+        print(f"  stop     : {PROG} down {label}\n", file=sys.stderr)
+        return
+
+    what = "cancel the job and close the tunnel" if owned else "close the tunnel (the job keeps running)"
+    print(f"  Ctrl-C to {what}\n", file=sys.stderr)
+    try:
+        hold(cl, dep)
+    finally:
+        if owned:
+            cancel(cl, dep)
+            drop_state(cl.name, label)
+        close_tunnel(cl, dep)
+
+
+def hold(cl: Cluster, dep: Deployment) -> None:
+    """Keep the tunnel up while the job runs. Laptop sleep or a network blip
+    kills the ssh master; it is reopened on the same local port."""
+    while True:
+        time.sleep(30)
+        state, _, _, _ = poll(cl, dep)
+        if state != "RUNNING":
+            show_logs(cl, dep, 20)
+            die(f"job {dep.job_id} is now {state}")
+        if not tunnel_alive(cl, dep):
+            warn("tunnel dropped; reopening")
+            open_tunnel(cl, dep)
+
+
+def cmd_env(cl: Cluster, a: argparse.Namespace) -> None:
+    dep = load_state(cl.name, parse_target(a.target, None)[0])
+    if dep is None:
+        die(f"no local deployment of {a.target} on {cl.name}; run `{PROG} up {a.target}`")
+    if not tunnel_alive(cl, dep):
+        warn(f"the tunnel is down; `{PROG} up {dep.label} --detach` reopens it")
+    sys.stdout.write(env_lines(dep))
+
+
+def cmd_status(cl: Cluster, a: argparse.Namespace) -> None:
+    rows = [r.split("|") for r in remote(cl, STATUS_SH, JOB_PREFIX).splitlines() if r.strip()]
+    local = {d.job_id: d for d in all_states(cl.name)}
+    if not rows and not local:
+        print(f"nothing deployed on {cl.name}")
+        return
+    print(f"{'JOB':<10} {'MODEL':<28} {'STATE':<10} {'NODE':<22} {'LEFT':<11} TUNNEL")
+    for job_id, name, state, node, _elapsed, left, reason in rows:
+        dep = local.pop(job_id, None)
+        tunnel = (dep.base_url if tunnel_alive(cl, dep) else "down") if dep else "-"
+        where = node if state == "RUNNING" else reason
+        print(f"{job_id:<10} {name[len(JOB_PREFIX):]:<28} {state:<10} {where:<22} {left:<11} {tunnel}")
+    for dep in local.values():  # job is gone, the local record is stale
+        print(f"{dep.job_id:<10} {dep.label:<28} {'GONE':<10} {'':<22} {'':<11} (run `{PROG} down {dep.label}`)")
+
+
+def cmd_logs(cl: Cluster, a: argparse.Namespace) -> None:
+    label = parse_target(a.target, None)[0]
+    dep = find_running(cl, label) or load_state(cl.name, label)
+    if dep is None:
+        die(f"no deployment of {label} found")
+    if a.follow:
+        cmd = f"tail -n {a.lines} -F " + " ".join(shlex.quote(f) for f in dep.logs())
+        os.execvp("ssh", ["ssh", *SSH_BASE, *_mux_opts(), cl.host, cmd])
+    sys.stdout.write(remote(cl, TAIL_SH, str(a.lines), *dep.logs(), check=False))
+
+
+def cmd_down(cl: Cluster, a: argparse.Namespace) -> None:
+    labels = [d.label for d in all_states(cl.name)] if a.all else [parse_target(a.target, None)[0]]
+    if a.all:
+        rows = remote(cl, STATUS_SH, JOB_PREFIX).splitlines()
+        labels = sorted(set(labels) | {r.split("|")[1][len(JOB_PREFIX):] for r in rows if r.strip()})
+    if not labels:
+        print("nothing to bring down")
+    for label in labels:
+        cached, live = load_state(cl.name, label), find_running(cl, label)
+        if live and not a.keep_job:
+            cancel(cl, live)
+        elif not live:
+            log(f"no active job for {label}")
+        if cached:
+            close_tunnel(cl, cached)
+        drop_state(cl.name, label)
+
+
+def cmd_push(cl: Cluster, a: argparse.Namespace) -> None:
+    """Each target is a label in recipes/<cluster>/ or a directory path; none means all labels."""
+    if a.label and len(a.targets) != 1:
+        die("--label needs exactly one directory")
+    if a.targets:
+        dirs = [Path(t) if Path(t).is_dir() else cl.local_recipes / t for t in a.targets]
+    else:
+        dirs = sorted(d for d in cl.local_recipes.glob("*") if d.is_dir())
+        if not dirs:
+            die(f"no local recipes for cluster '{cl.name}' in {cl.local_recipes}")
+    for d in dirs:
+        if not d.is_dir():
+            die(f"no recipe directory '{d.name}' for cluster '{cl.name}' (looked in {cl.local_recipes})")
+        push_dir(cl, d.resolve(), a.label or d.resolve().name)
+
+
+def push_dir(cl: Cluster, src: Path, label: str) -> None:
+    recipes = sorted(src.glob("*.sbatch"))
+    if not recipes:
+        die(f"{src} has no *.sbatch recipes")
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for f in sorted(src.iterdir()):
+            if f.is_file():
+                tar.add(f, arcname=f.name)
+    log(f"pushing {', '.join(r.stem for r in recipes)} to {cl.host}:{cl.deploy_dir}/{label}")
+    # Recipe directories are tiny: ship the tarball inside the script itself.
+    payload = base64.b64encode(buf.getvalue()).decode()
+    remote(cl, f"SSERVE_TAR={payload}\n" + PUSH_SH, cl.deploy_dir, label)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def main(argv: list[str]) -> int:
+    # Everything after a bare "--" goes to sbatch verbatim.
+    sbatch_args: list[str] = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, sbatch_args = argv[:i], argv[i + 1:]
+
+    ap = argparse.ArgumentParser(prog=PROG, description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 epilog="\n\n".join(__doc__.split("\n\n")[1:]))
+    ap.add_argument("-c", "--cluster", help="cluster name from the config, or a bare ssh host")
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
+
+    sub.add_parser("ls", help="list deployable models and recipes")
+
+    up = sub.add_parser("up", help="launch (or attach to) a deployment and open the tunnel",
+                        description="Launch a recipe, wait for /health, tunnel it to localhost. "
+                                    "Re-running `up` for a running model attaches to it. "
+                                    "Arguments after `--` go to sbatch, e.g. `-- --time=4:00:00`.")
+    up.add_argument("target", help="<label> or <label>:<recipe>")
+    up.add_argument("-r", "--recipe", help=f"recipe name (default: {DEFAULT_RECIPE})")
+    up.add_argument("-d", "--detach", action="store_true", help="return once ready; leave job and tunnel running")
+    up.add_argument("-p", "--local-port", type=int, default=0, help=f"local tunnel port (default: first free from {LOCAL_PORTS.start})")
+    up.add_argument("--bind", default="127.0.0.1", help="local bind address; 0.0.0.0 lets containers reach it")
+    up.add_argument("--ready-timeout", type=float, default=7200, help="seconds to wait for queue + model load (default: 7200)")
+    up.add_argument("--keep-job", action="store_true", help="do not cancel the job on Ctrl-C")
+    up.add_argument("-n", "--dry-run", action="store_true", help="show what would be submitted")
+
+    ev = sub.add_parser("env", help="print OPENAI_* exports for a deployment")
+    ev.add_argument("target")
+
+    sub.add_parser("status", help="sserve jobs on the cluster and local tunnels")
+
+    lg = sub.add_parser("logs", help="show the SLURM logs of a deployment")
+    lg.add_argument("target")
+    lg.add_argument("-f", "--follow", action="store_true")
+    lg.add_argument("-n", "--lines", type=int, default=60)
+
+    dn = sub.add_parser("down", help="cancel the job and close the tunnel")
+    dn.add_argument("target", nargs="?")
+    dn.add_argument("--all", action="store_true", help="every sserve deployment on the cluster")
+    dn.add_argument("--keep-job", action="store_true", help="only close the local tunnel")
+
+    ps = sub.add_parser("push", help="upload this cluster's local recipes to its catalogue",
+                        description="Upload recipes/<cluster>/<label>/ to the cluster. Targets are labels "
+                                    "or directory paths; with no target, every label of the cluster is pushed.")
+    ps.add_argument("targets", nargs="*", metavar="LABEL|DIR")
+    ps.add_argument("--label", help="remote label for a single directory (default: its name)")
+
+    a = ap.parse_args(argv)
+    a.sbatch_args = sbatch_args
+    if sbatch_args and a.cmd != "up":
+        ap.error("arguments after `--` are only accepted by `up`")
+    if a.cmd == "down" and not (a.target or a.all):
+        ap.error("down needs a model label or --all")
+
+    # Turn SIGTERM/SIGHUP into the same clean teardown as Ctrl-C.
+    def _interrupt(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _interrupt)
+    signal.signal(signal.SIGHUP, _interrupt)
+
+    try:
+        cl = resolve_cluster(a.cluster)
+        {"ls": cmd_ls, "up": cmd_up, "env": cmd_env, "status": cmd_status,
+         "logs": cmd_logs, "down": cmd_down, "push": cmd_push}[a.cmd](cl, a)
+    except Die as e:
+        _say("1;31", " ERROR", str(e))
+        return 1
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
