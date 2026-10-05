@@ -2,14 +2,16 @@
 
 ## Install
 
-On the machine that runs your client or agent, you need `python3` and `ssh`.
-Python 3.11 or newer is needed only to read the config file; if you don't have
-it, run `pixi global install python`.
-
 ```bash
-ln -s "$PWD/sserve" ~/.local/bin/sserve          # from the repository root
-mkdir -p ~/.config/sserve && cp config.example.toml ~/.config/sserve/config.toml
+git clone https://github.com/alessandrocornacchia/sserve && sserve/install.sh
 ```
+
+`install.sh` links `sserve` into `~/.local/bin` (or `$SSERVE_BIN`) and copies
+`config.example.toml` to `~/.config/sserve/config.toml` (or `$SSERVE_CONFIG`)
+if you don't have a config yet. It's safe to run again: an existing config is
+never overwritten. It checks for `python3` and `ssh`, and tells you if
+`~/.local/bin` isn't on your `PATH`. The config file needs Python 3.11 or newer;
+if you don't have it, run `pixi global install python`.
 
 ## The config file
 
