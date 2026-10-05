@@ -84,7 +84,7 @@ client.chat.completions.create(model="deepseek-ai/DeepSeek-V4-Flash-0731",
 | Cluster | Model | Recipes |
 |---|---|---|
 | ORIX (H100/H200) | `deepseek-v4-flash` | `default` (H200), `h100`, `pi` (group reservation), `freecycle` (preemptible) |
-| ROCS (A100) | `qwen3.6-35b-a3b-fp8` | `default` |
+| ROCS (A100/V100/P100) | `qwen3.6-35b-a3b-fp8` | `default` (A100 80 GB), `spot` (preemptible), `a100-40gb` (2 × 40 GB) |
 
 ## Learn more
 
@@ -92,3 +92,4 @@ client.chat.completions.create(model="deepseek-ai/DeepSeek-V4-Flash-0731",
 - [Configuration](docs/configuration.md): installing, `config.toml`, multiple clusters
 - [Recipes](docs/recipes.md): the catalogue, `push`/`ls`, and how to write a recipe
 - [ORIX guide](docs/orix.md): partitions, quotas, preemption and idle-job rules on ORIX
+- [ROCS guide](docs/rocs.md): VPN access, QoS, preemption and GPU choice on the ROCS testbed

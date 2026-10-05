@@ -13,9 +13,12 @@ recipes/
       pi.sbatch                   sserve up deepseek-v4-flash:pi          pi-caninim reservation (or -r pi)
       freecycle.sbatch            sserve up deepseek-v4-flash:freecycle   preemptible, requeued
       serve.sh                    the vLLM command all four recipes share
-  rocs/                           # [clusters.rocs]: A100
+  rocs/                           # [clusters.rocs]: A100/V100/P100
     qwen3.6-35b-a3b-fp8/
-      default.sbatch              sserve -c rocs up qwen3.6-35b-a3b-fp8
+      default.sbatch              sserve -c rocs up qwen3.6-35b-a3b-fp8             1 x A100 80GB
+      spot.sbatch                 sserve -c rocs up qwen3.6-35b-a3b-fp8:spot        preemptible, requeued
+      a100-40gb.sbatch            sserve -c rocs up qwen3.6-35b-a3b-fp8:a100-40gb   2 x A100 40GB, TP=2
+      serve.sh                    the vLLM command the three recipes share
 ```
 
 A model's directory is its **label**. Each `*.sbatch` file in it is a
