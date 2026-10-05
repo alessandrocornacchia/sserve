@@ -5,8 +5,9 @@ is the SANDS group's SLURM cluster: A100 (80 GB and 40 GB), V100 and P100
 GPUs. It is more relaxed than ORIX (smaller user base, 14-day jobs, a 15%
 idle threshold), but it's only reachable through its VPN.
 
-> These recipes were written from the ROCS documentation and haven't been run
-> through sserve yet.
+> `default` was tested through sserve on 2026-10-05 (mcnode22: ~6 min to load the
+> weights, ~13 min from submit to healthy). `spot` and `a100-40gb` haven't been
+> run yet.
 
 ## Connecting
 
@@ -86,5 +87,5 @@ done.
 ## Environment
 
 The recipes use the mamba environment `vllm-0.19-env`, activated by a login
-shell. `[clusters.rocs]` runs `module load slurm` before every remote command;
-drop that `prelude` if `sbatch` is already on your `PATH` on `mcmgt01`.
+shell. `sbatch` and `squeue` are already on the `PATH` of non-interactive shells on
+`mcmgt01`, so `[clusters.rocs]` needs no `prelude` (`module` isn't defined there).
