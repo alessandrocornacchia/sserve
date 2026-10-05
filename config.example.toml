@@ -11,6 +11,6 @@ runs_dir = "~/.vllm/runs"            # one directory per run: logs, key, recipe 
 # sbatch_args = ["--account=myproject"]   # added to every submission on this cluster
 # recipes_dir = "~/my-recipes/orix"       # local catalogue (default: recipes/<cluster name> in the repo)
 
-[clusters.mcm]
+[clusters.rocs]
 host = "mcmgt01"
 prelude = "module load slurm"        # shell run before every remote command, if sbatch isn't on PATH

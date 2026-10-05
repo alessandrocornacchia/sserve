@@ -1,0 +1,76 @@
+# Recipes
+
+sserve only runs models that already work on a given cluster. Recipes are
+specific to a cluster (GPU types, partitions, environments), so the repository
+keeps one catalogue per cluster, named as in `config.toml`:
+
+```
+recipes/
+  orix/                           # [clusters.orix]: H100/H200
+    deepseek-v4-flash/
+      default.sbatch              sserve up deepseek-v4-flash             batch-h200, shared pool
+      h100.sbatch                 sserve up deepseek-v4-flash:h100        batch-h100, shared pool
+      pi.sbatch                   sserve up deepseek-v4-flash:pi          pi-caninim reservation (or -r pi)
+      freecycle.sbatch            sserve up deepseek-v4-flash:freecycle   preemptible, requeued
+      serve.sh                    the vLLM command all four recipes share
+  rocs/                           # [clusters.rocs]: A100
+    qwen3.6-35b-a3b-fp8/
+      default.sbatch              sserve -c rocs up qwen3.6-35b-a3b-fp8
+```
+
+A model's directory is its **label**. Each `*.sbatch` file in it is a
+**recipe**: `default` runs with `sserve up <label>`, and any other one with
+`sserve up <label>:<recipe>` or `-r <recipe>`.
+
+## Uploading and listing
+
+`sserve push` uploads the selected cluster's catalogue to its `deploy_dir`
+(`~/.vllm/deploy/<label>/` by default). `sserve push <label>` uploads a single
+model; a directory path works too, with `--label` to rename it.
+
+`sserve ls` lists the recipes on the cluster, using each recipe's
+`# sserve: <description>` line, and marks where the cluster and the repository
+disagree:
+
+```
+deepseek-v4-flash         DeepSeek-V4-Flash, 1 node x 4 H200, ...
+deepseek-v4-flash:8xh200  [remote only] hand-made on the cluster
+qwen-next                 [not pushed] ...
+llama-x                   [differs] ...         # same name, different content
+```
+
+Only `*.sbatch` files are compared, so a change to a helper such as `serve.sh`
+doesn't show as `[differs]`. Run `sserve push` after editing one.
+
+## Writing a recipe
+
+A recipe is a normal sbatch script plus three rules:
+
+```bash
+#!/bin/bash --login
+# sserve: one-line description shown by `sserve ls`
+#SBATCH --gres=gpu:...  --time=...           # resources are the recipe's business
+
+: "${VLLM_PORT:=8000}"
+[[ -n "${SSERVE_KEY_FILE:-}" ]] && export VLLM_API_KEY="$(<"$SSERVE_KEY_FILE")"
+
+exec vllm serve <model> --host 0.0.0.0 --port "$VLLM_PORT" ...
+```
+
+1. **Serve on `$VLLM_PORT`.** sserve picks a random port from 20000 to 29999
+   for each run, so two jobs on the same node don't clash.
+2. **Export `VLLM_API_KEY` from `$SSERVE_KEY_FILE`.** Each run gets a fresh
+   key. Without one, anyone on the cluster network could use your endpoint.
+3. **Run the API server on the job's first node.**
+
+Recipes still work with a plain `sbatch` (port 8000, no key). sserve also
+exports `SSERVE_RUN_DIR`, `SSERVE_LABEL`, and `SSERVE_RECIPE_DIR`. The last
+one is the recipe's directory, for files kept next to the recipe, such as chat
+templates or a shared launch script.
+
+sserve sets `--job-name`, `--chdir`, `--output` and `--error` itself, and these
+override the recipe's values. Logs go to the run directory.
+
+When several recipes of one model only differ in where they run, keep the
+`vllm serve` command in a shared script and `exec` it from each recipe, as
+`recipes/orix/deepseek-v4-flash/` does with `serve.sh`.
