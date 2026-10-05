@@ -621,6 +621,8 @@ def cmd_down(cl: Cluster, a: argparse.Namespace) -> None:
             cancel(cl, live)
         elif not live:
             log(f"no active job for {label}")
+            if cached:  # preempted or timed out: the key outlived the server
+                remote(cl, 'rm -f "$1/api_key"', cached.run_dir, check=False)
         if cached:
             close_tunnel(cl, cached)
         drop_state(cl.name, label)
