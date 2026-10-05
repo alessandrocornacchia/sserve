@@ -41,8 +41,11 @@ one catalogue per cluster, named as in `config.toml`:
 recipes/
   orix/                           # [clusters.orix]: H100/H200
     deepseek-v4-flash/
-      default.sbatch              sserve up deepseek-v4-flash
-      long-ctx.sbatch             sserve up deepseek-v4-flash:long-ctx   (or -r long-ctx)
+      default.sbatch              sserve up deepseek-v4-flash             batch-h200, shared pool
+      h100.sbatch                 sserve up deepseek-v4-flash:h100        batch-h100, shared pool
+      pi.sbatch                   sserve up deepseek-v4-flash:pi          pi-caninim reservation (or -r pi)
+      freecycle.sbatch            sserve up deepseek-v4-flash:freecycle   preemptible, requeued
+      serve.sh                    the vLLM command all four recipes share
   mcm/                            # [clusters.mcm]: A100
     qwen3.6-35b-a3b-fp8/
       default.sbatch              sserve -c mcm up qwen3.6-35b-a3b-fp8
@@ -62,6 +65,35 @@ llama-x                   [differs] ...         # same name, different content
 ```
 
 Set `recipes_dir` in the config to keep a cluster's catalogue somewhere else.
+
+### ORIX notes
+
+On ORIX ([cluster policy](https://orix.kaust.edu.sa/cluster_policy/)), the
+recipe variant picks the partition:
+
+- **`default` (`batch-h200`, QoS `batch`).** Not preemptible, but the QoS caps
+  the whole PI account at 8 GPU / 128 CPU / 1438 GB, so a group-mate's big job
+  leaves yours pending with `MaxMemoryPerAccount`. `/opt/orix/utils/susage`
+  shows what is free. Name `batch-h200` explicitly: the bare `batch`
+  meta-partition also offers the job to `batch-h100`, which reports
+  `BadConstraints` for an H200 request (harmless, but noisy). An explicit
+  partition also needs an explicit `--qos=batch`.
+- **`h100` (`batch-h100`, QoS `batch`).** The same model on 4 x H100: weights take
+  ~45.5 GiB per GPU, which leaves ~19 GiB of KV cache (~750k tokens per DP rank,
+  about 5.7 concurrent 128k-token requests). Same batch cap as `default`, shared
+  across both GPU types. A single job never mixes H100 and H200.
+- **`pi` (`pi-caninim`).** Reserved and never preempted; it evicts freecycle
+  jobs. It is a 4-GPU half node, so this recipe takes the whole group's
+  reservation.
+- **`freecycle` (`freecycle-h200`).** Higher limits, but any other job can
+  preempt it (SIGTERM, 60 s grace). The recipe passes `--requeue`, so vLLM comes
+  back with the same job ID, port and key, probably on another node. Run
+  `sserve up <label>:freecycle` again to re-attach the tunnel.
+- **Idle endpoints get cancelled.** A GPU averaging below 75% utilisation (50%
+  on `pi-*`) for two consecutive 1-hour windows gets the job cancelled, and
+  repeatedly holding idle GPUs can get the account suspended. The recipes ask
+  for 4 h; run `sserve down` as soon as you are done, and pass
+  `-- --time=...` for longer runs that keep the GPUs busy.
 
 ### Recipe contract
 
