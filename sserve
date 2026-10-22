@@ -21,12 +21,15 @@ machine re-attaches to a running deployment instead of starting a second one.
 
 Commands (see `sserve <command> -h`):
     ls       list the cluster's recipes, and whether they match the local copies
+    cat      show a recipe and where it lives (local copy, else the cluster's)
     up       submit a recipe (or attach to a running one), wait, open the tunnel
     env      print OPENAI_BASE_URL / OPENAI_API_KEY for a running deployment
     status   show sserve jobs on the cluster and local tunnels
     logs     show (or follow) the SLURM logs of a deployment
     down     cancel the job and close the tunnel
     push     upload recipes/<cluster>/<label>/ to the cluster's catalogue
+    pull     download the cluster's catalogue into recipes/<cluster>/
+    sync     like pull, and delete local files the cluster's copy lacks
     config   show where sserve is installed and the configuration it resolved
 """
 
@@ -34,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import difflib
 import hashlib
 import io
 import json
@@ -249,6 +253,28 @@ PUSH_SH = _EXPAND + r'''
 set -euo pipefail
 d="$(x "$1")/$2"
 mkdir -p "$d" && printf %s "$SSERVE_TAR" | base64 -d | tar -C "$d" -xf -
+'''
+
+CAT_SH = _EXPAND + r'''
+f="$(x "$1")/$2/$3.sbatch"
+[ -f "$f" ] || { echo "no recipe $2:$3 on the cluster (looked for $f)" >&2; exit 3; }
+printf '%s\n' "$f"
+cat "$f"
+'''
+
+FILES_SH = _EXPAND + r'''
+d=$(x "$1")
+[ -d "$d" ] || exit 0
+cd "$d"
+for f in */*; do
+    [ -f "$f" ] && printf '%s\t%s\n' "$(sha256sum "$f" | cut -c1-64)" "$f"
+done
+'''
+
+FETCH_SH = _EXPAND + r'''
+set -euo pipefail
+cd "$(x "$1")"; shift
+tar -cf - -- "$@" | base64
 '''
 
 TAIL_SH = r'''
@@ -505,9 +531,44 @@ def cmd_ls(cl: Cluster, a: argparse.Namespace) -> None:
         desc = (remote_rows.get(k) or local[k])[1]
         flag = sync(k)
         print(f"{names[k]:<{width}}  {f'[{flag}] ' if flag else ''}{desc}")
-    if any(sync(k) in ("not pushed", "differs") for k in keys):
+    flags = {sync(k) for k in keys}
+    if flags & {"not pushed", "differs", "remote only"}:
         sys.stdout.flush()
-        print(f"\n`{cl.cli} push` uploads {cl.local_recipes}", file=sys.stderr)
+        print(file=sys.stderr)
+    if flags & {"not pushed", "differs"}:
+        print(f"`{cl.cli} push` uploads {cl.local_recipes}", file=sys.stderr)
+    if flags & {"remote only", "differs"}:
+        print(f"`{cl.cli} pull` downloads the cluster's recipes into {cl.local_recipes}", file=sys.stderr)
+
+
+def viewer_cmd(path: Path) -> list[str] | None:
+    """A terminal file manager for a local recipe: spf on Linux opens its
+    directory, yazi on macOS opens on the file itself."""
+    if sys.platform == "darwin" and (exe := shutil.which("yazi")):
+        return [exe, str(path)]
+    if sys.platform.startswith("linux") and (exe := shutil.which("spf")):
+        return [exe, str(path.parent)]
+    return None
+
+
+def cmd_cat(cl: Cluster, a: argparse.Namespace) -> None:
+    """The local copy if there is one (no ssh needed), else the cluster's."""
+    label, recipe = parse_target(a.target, a.recipe)
+    local = cl.local_recipes / label / f"{recipe}.sbatch"
+    if local.is_file() and not a.remote:
+        viewer = None if a.plain or not sys.stdout.isatty() else viewer_cmd(local)
+        if viewer:
+            subprocess.run(viewer)
+            print(f"{label}:{recipe} is {local}", file=sys.stderr)
+            return
+        print(f"==> {local} <==", file=sys.stderr, flush=True)
+        sys.stdout.write(local.read_text())
+        return
+    if not a.remote:
+        log(f"{label}:{recipe} is not in {cl.local_recipes}; showing the copy on {cl.host}")
+    path, _, text = remote(cl, CAT_SH, cl.deploy_dir, label, recipe).partition("\n")
+    print(f"==> {cl.host}:{path} <==", file=sys.stderr, flush=True)
+    sys.stdout.write(text)
 
 
 def cmd_up(cl: Cluster, a: argparse.Namespace) -> None:
@@ -521,11 +582,13 @@ def cmd_up(cl: Cluster, a: argparse.Namespace) -> None:
         if cached and cached.job_id == dep.job_id:
             dep = cached  # keep local port and served model across re-attaches
         log(f"attaching to running job {dep.job_id} ({label}:{dep.recipe})")
-    elif a.dry_run:
-        print(f"would submit {cl.host}:{cl.deploy_dir}/{label}/{recipe}.sbatch "
-              f"with sbatch {' '.join(cl.sbatch_args + a.sbatch_args)}")
-        return
     else:
+        if not a.no_check:
+            check_recipes(cl, label, a)
+        if a.dry_run:
+            print(f"would submit {cl.host}:{cl.deploy_dir}/{label}/{recipe}.sbatch "
+                  f"with sbatch {' '.join(cl.sbatch_args + a.sbatch_args)}")
+            return
         log(f"submitting {label}:{recipe} on {cl.host}")
         dep = submit(cl, label, recipe, a.sbatch_args)
         log(f"job {dep.job_id}, run dir {cl.host}:{dep.run_dir}")
@@ -671,6 +734,120 @@ def push_dir(cl: Cluster, src: Path, label: str) -> None:
     remote(cl, f"SSERVE_TAR={payload}\n" + PUSH_SH, cl.deploy_dir, label)
 
 
+def remote_files(cl: Cluster, labels: set[str] | None = None) -> dict[str, str]:
+    """'<label>/<file>' -> sha256 for the files of the cluster's catalogue."""
+    out = {}
+    for row in remote(cl, FILES_SH, cl.deploy_dir).splitlines():
+        digest, _, rel = row.partition("\t")
+        if rel and (labels is None or rel.split("/")[0] in labels):
+            out[rel] = digest
+    return out
+
+
+def local_files(cl: Cluster, labels: set[str] | None = None) -> dict[str, str]:
+    """The same for recipes/<cluster>/, comparable key for key."""
+    return {f"{f.parent.name}/{f.name}": hashlib.sha256(f.read_bytes()).hexdigest()
+            for f in sorted(cl.local_recipes.glob("*/*"))
+            if f.is_file() and (labels is None or f.parent.name in labels)}
+
+
+def fetch(cl: Cluster, rels: list[str]) -> dict[str, tuple[bytes, int]]:
+    """'<label>/<file>' -> (content, mode), read from the cluster's catalogue."""
+    data = base64.b64decode(remote(cl, FETCH_SH, cl.deploy_dir, *rels))
+    with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+        return {m.name: (tar.extractfile(m).read(), m.mode) for m in tar.getmembers() if m.isfile()}
+
+
+def ask(question: str) -> str:
+    """One lowercase answer from the terminal; '' for a bare Enter or EOF."""
+    print(question, end=" ", file=sys.stderr, flush=True)
+    return sys.stdin.readline().strip().lower()
+
+
+def show_diff(cl: Cluster, rels: list[str]) -> None:
+    theirs = fetch(cl, rels)
+    for rel in rels:
+        ours = (cl.local_recipes / rel).read_text(errors="replace").splitlines(keepends=True)
+        old = theirs.get(rel, (b"", 0))[0].decode(errors="replace").splitlines(keepends=True)
+        sys.stderr.writelines(difflib.unified_diff(old, ours, f"{cl.host}:{rel}", f"local:{rel}"))
+
+
+def check_recipes(cl: Cluster, label: str, a: argparse.Namespace) -> None:
+    """Before a submit: when recipes/<cluster>/<label>/ has files the cluster's copy
+    lacks or that differ from it, offer to push them so the local version is what runs."""
+    src = cl.local_recipes / label
+    if not src.is_dir():
+        return
+    local, theirs = local_files(cl, {label}), remote_files(cl, {label})
+    changed = [r for r in local if r in theirs and local[r] != theirs[r]]
+    new = [r for r in local if r not in theirs]
+    if not changed and not new:
+        return
+    warn(f"{src} differs from {cl.host}:{cl.deploy_dir}/{label}:")
+    for r in changed:
+        print(f"    ~ {r}", file=sys.stderr)
+    for r in new:
+        print(f"    + {r}  (not on the cluster)", file=sys.stderr)
+    if a.dry_run:
+        print(f"would push {src} before submitting" if a.push else
+              f"would ask to push {src} before submitting (--push skips the question)")
+        return
+    if not a.push:
+        if not sys.stdin.isatty():
+            warn("no terminal to ask: deploying the cluster's copy (--push uploads the local one)")
+            return
+        while (answer := ask("push the local copy over the cluster's and deploy it? [y/N/d=diff]")) == "d":
+            show_diff(cl, changed)
+        if answer not in ("y", "yes"):
+            log("deploying the cluster's copy")
+            return
+    push_dir(cl, src.resolve(), label)
+
+
+def cmd_pull(cl: Cluster, a: argparse.Namespace) -> None:
+    """pull copies the cluster's files over the local ones; sync also deletes the
+    local files the cluster lacks, so each label ends up identical to the cluster's."""
+    mirror = a.cmd == "sync"
+    theirs = remote_files(cl, set(a.labels) if a.labels else None)
+    labels = set(a.labels) if a.labels else {r.split("/")[0] for r in theirs}
+    missing = labels - {r.split("/")[0] for r in theirs}
+    if missing:
+        die(f"not on {cl.host}:{cl.deploy_dir}: {', '.join(sorted(missing))}")
+    if not labels:
+        die(f"no recipes on {cl.host}:{cl.deploy_dir}")
+    local = local_files(cl, labels)
+
+    new = sorted(r for r in theirs if r not in local)
+    changed = sorted(r for r in theirs if r in local and local[r] != theirs[r])
+    gone = sorted(r for r in local if r not in theirs) if mirror else []
+    if not (new or changed or gone):
+        print(f"{cl.local_recipes} is up to date with {cl.host}:{cl.deploy_dir}")
+        return
+    for mark, rels in (("+", new), ("~", changed), ("-", gone)):
+        for r in rels:
+            print(f"    {mark} {r}", file=sys.stderr)
+    if (changed or gone) and not a.yes:
+        if not sys.stdin.isatty():
+            die("this overwrites or deletes local files: pass -y to confirm")
+        if ask(f"overwrite {len(changed)} and delete {len(gone)} local file(s)? [y/N]") not in ("y", "yes"):
+            die("nothing changed")
+
+    if new or changed:
+        log(f"pulling {len(new) + len(changed)} file(s) from {cl.host}:{cl.deploy_dir} to {cl.local_recipes}")
+    got = fetch(cl, new + changed) if new or changed else {}
+    for rel in new + changed:
+        body, mode = got[rel]
+        dest = cl.local_recipes / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(body)
+        dest.chmod(mode & 0o777)
+    for rel in gone:
+        log(f"deleting {cl.local_recipes / rel}")
+        (cl.local_recipes / rel).unlink()
+    for label in sorted(labels - {r.split("/")[0] for r in local}):
+        log(f"new label {label}: recipes/{cl.name}/{label}/")
+
+
 def _version(repo: Path) -> str:
     if not (repo / ".git").exists():
         return "unknown (not a git checkout)"
@@ -747,6 +924,15 @@ def main(argv: list[str]) -> int:
 
     sub.add_parser("ls", help="list deployable models and recipes")
 
+    ct = sub.add_parser("cat", help="show a recipe and where it lives",
+                        description="Show a recipe and its path: the local copy in recipes/<cluster>/ "
+                                    "if there is one, else the cluster's. On a terminal, a local recipe "
+                                    "opens in spf (Linux) or yazi (macOS) when installed.")
+    ct.add_argument("target", help="<label> or <label>:<recipe>")
+    ct.add_argument("-r", "--recipe", help=f"recipe name (default: {DEFAULT_RECIPE})")
+    ct.add_argument("--remote", action="store_true", help="show the cluster's copy, even if there is a local one")
+    ct.add_argument("--plain", action="store_true", help="print the file instead of opening a file manager")
+
     up = sub.add_parser("up", help="launch (or attach to) a deployment and open the tunnel",
                         description="Launch a recipe, wait for /health, tunnel it to localhost. "
                                     "Re-running `up` for a running model attaches to it. "
@@ -759,6 +945,9 @@ def main(argv: list[str]) -> int:
     up.add_argument("--ready-timeout", type=float, default=7200, help="seconds to wait for queue + model load (default: 7200)")
     up.add_argument("--keep-job", action="store_true", help="do not cancel the job on Ctrl-C")
     up.add_argument("-n", "--dry-run", action="store_true", help="show what would be submitted")
+    up.add_argument("--push", action="store_true",
+                    help="if the local recipes differ from the cluster's, push them without asking")
+    up.add_argument("--no-check", action="store_true", help="deploy the cluster's copy without comparing it to the local one")
 
     ev = sub.add_parser("env", help="print OPENAI_* exports for a deployment")
     ev.add_argument("target")
@@ -781,6 +970,18 @@ def main(argv: list[str]) -> int:
     ps.add_argument("targets", nargs="*", metavar="LABEL|DIR")
     ps.add_argument("--label", help="remote label for a single directory (default: its name)")
 
+    for name, help_, desc in (
+        ("pull", "download the cluster's recipes into the local catalogue",
+         "Copy <deploy_dir>/<label>/ from the cluster into recipes/<cluster>/<label>/, overwriting "
+         "local files that differ. With no label, every label on the cluster is pulled."),
+        ("sync", "make local labels identical to the cluster's",
+         "Like pull, but also delete local files the cluster's copy lacks, so each label ends up "
+         "identical to the cluster's. Labels that exist only locally are left alone."),
+    ):
+        pl = sub.add_parser(name, help=help_, description=desc)
+        pl.add_argument("labels", nargs="*", metavar="LABEL")
+        pl.add_argument("-y", "--yes", action="store_true", help="overwrite or delete local files without asking")
+
     cf = sub.add_parser("config", help="show install location and resolved configuration")
     cf.add_argument("action", nargs="?", choices=["show"], default="show")
 
@@ -801,8 +1002,9 @@ def main(argv: list[str]) -> int:
         if a.cmd == "config":
             return cmd_config(a) or 0
         cl = resolve_cluster(a.cluster)
-        {"ls": cmd_ls, "up": cmd_up, "env": cmd_env, "status": cmd_status,
-         "logs": cmd_logs, "down": cmd_down, "push": cmd_push}[a.cmd](cl, a)
+        {"ls": cmd_ls, "cat": cmd_cat, "up": cmd_up, "env": cmd_env, "status": cmd_status,
+         "logs": cmd_logs, "down": cmd_down, "push": cmd_push,
+         "pull": cmd_pull, "sync": cmd_pull}[a.cmd](cl, a)
     except Die as e:
         _say("1;31", " ERROR", str(e))
         return 1

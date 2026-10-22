@@ -45,6 +45,28 @@ llama-x                   [differs] ...         # same name, different content
 Only `*.sbatch` files are compared, so a change to a helper such as `serve.sh`
 doesn't show as `[differs]`. Run `sserve push` after editing one.
 
+`sserve pull` goes the other way: it copies the cluster's catalogue (or the
+labels you name) into `recipes/<cluster>/`, e.g. to keep a recipe that was
+hand-made on the cluster. `sserve sync` does the same and also deletes local
+files the cluster's copy lacks, so each label ends up identical to the
+cluster's; labels that exist only locally are left alone. Both list the changes
+(`+` new, `~` overwritten, `-` deleted) and ask before overwriting or deleting
+anything (`-y` skips the question).
+
+Before submitting, `sserve up` compares the label's local directory, helpers
+included, with the cluster's. If a local file is new or different, it lists the
+files and asks whether to push the local copy and deploy it (`d` shows a diff).
+Answering no deploys the cluster's copy as it is. `--push` pushes without
+asking, and `--no-check` skips the comparison. Without a terminal to ask on, it
+deploys the cluster's copy. Attaching to a running job skips the check.
+
+`sserve cat <label>[:<recipe>]` shows a recipe and its path. It reads the local
+copy in `recipes/<cluster>/` when there is one, and otherwise the cluster's
+(`--remote` always reads the cluster's). On a terminal, a local recipe opens in
+a file manager when one is installed: `spf` on Linux opens the recipe's
+directory, `yazi` on macOS opens on the file. `--plain`, or piping the output,
+prints the file instead, with a `==> path <==` header on stderr.
+
 ## Writing a recipe
 
 A recipe is a normal sbatch script plus three rules:
