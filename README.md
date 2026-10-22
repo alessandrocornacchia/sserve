@@ -95,7 +95,7 @@ print(r.choices[0].message.content)
 
 | | |
 |---|---|
-| `sserve ls` | list the recipes on the cluster |
+| `sserve ls [-w]` | list the recipes on the cluster (`-w`: with their paths) |
 | `sserve up <model>[:<recipe>]` | launch a model (or attach to it if it's already running) and connect |
 | `sserve up <model> -d` | the same, but return once ready and leave it running |
 | `sserve env <model>` | print the environment variables for your client |

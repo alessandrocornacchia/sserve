@@ -31,19 +31,24 @@ A model's directory is its **label**. Each `*.sbatch` file in it is a
 (`~/.vllm/deploy/<label>/` by default). `sserve push <label>` uploads a single
 model; a directory path works too, with `--label` to rename it.
 
-`sserve ls` lists the recipes on the cluster, using each recipe's
-`# sserve: <description>` line, and marks where the cluster and the repository
-disagree:
+`sserve ls` lists the recipes of the selected cluster (`TARGET`), using each
+recipe's `# sserve: <description>` line:
 
 ```
-deepseek-v4-flash         DeepSeek-V4-Flash, 1 node x 4 H200, ...
-deepseek-v4-flash:8xh200  [remote only] hand-made on the cluster
-qwen-next                 [not pushed] ...
-llama-x                   [differs] ...         # same name, different content
+RECIPE                    TARGET  DESCRIPTION
+deepseek-v4-flash         orix    DeepSeek-V4-Flash, 1 node x 4 H200, ...
+deepseek-v4-flash:8xh200  orix    hand-made on the cluster
 ```
 
-Only `*.sbatch` files are compared, so a change to a helper such as `serve.sh`
-doesn't show as `[differs]`. Run `sserve push` after editing one.
+It lists both the recipes on the cluster and the local ones in
+`recipes/<cluster>/`. If a local recipe isn't pushed yet, or differs from the
+cluster's copy, `ls` ends with a reminder to run `sserve push`. Only `*.sbatch`
+files are compared, so run `sserve push` yourself after editing a helper such
+as `serve.sh`.
+
+`sserve ls --wide` (`-w`) adds a `PATH` column on the right: `host:/path/to/recipe.sbatch`
+for the copy on the cluster (the one `sserve up` runs), or the local file for
+a recipe that isn't pushed yet.
 
 ## Writing a recipe
 
