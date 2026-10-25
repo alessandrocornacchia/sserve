@@ -38,6 +38,18 @@ $ eval "$(sserve env my-model)"     # OPENAI_BASE_URL, OPENAI_API_KEY, SSERVE_MO
 
 It only needs `python3` and `ssh` locally, and SSH access to the login node.
 
+## Shared inference service (prototype)
+
+The optional **sserved** manager provides a shared endpoint for clients on
+different machines. It requests cluster capacity on demand and releases unused
+jobs, without giving clients cluster SSH access. This prototype is on
+`feat/manager-leases`; the manual workflow below is unchanged.
+
+- [Use an existing service](docs/manager.md)
+- [Set up and operate a manager](docs/manager-operator.md)
+- [Workflow and responsibilities](docs/manager-overview.md)
+- [Prototype requirements](docs/manager-specification.md)
+
 ## Install
 
 ```bash

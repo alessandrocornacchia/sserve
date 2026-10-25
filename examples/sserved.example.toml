@@ -1,0 +1,95 @@
+# sserved example: one ORIX cluster, small Qwen3 for smoke tests, Ornith-1.5-122B for benchmarks.
+# Validate with: sserved -c examples/sserved.example.toml check
+# Site limits and utilisation policies change: these values are examples, not entitlements.
+
+[server]
+listen = "127.0.0.1:8470"                  # loopback by default; see `check` for exposure rules
+# advertised_url = "https://inference.example.org/sserve"   # what remote clients/containers use
+# root_path = "/sserve"                    # prefix added by a reverse proxy in front
+# trusted_network = false                  # true only for a private network without TLS
+state_dir = "~/.local/state/sserved"
+reconcile_interval_s = 15
+
+[leases]
+default_ttl_s = 300
+max_ttl_s = 3600
+prep_grace_s = 1800                        # starts when the model is first ready
+idle_timeout_s = 1800
+acquire_timeout_s = 21600                  # give up on demand that never became ready
+linger_s = 600
+
+[scaling]
+window_s = 300
+cooldown_s = 600
+up_waiting_per_replica = 2.0
+up_kv_usage = 0.9
+down_load_per_replica = 1.0
+max_startup_gpus = 4                       # GPUs of duplicate racing candidates still loading
+max_total_gpus = 8
+max_candidates_per_slot = 3
+max_submissions_per_day = 12
+max_startup_failures = 3
+replace_before_s = 1800
+drain_deadline_s = 900
+
+[clusters.orix]
+host = "cornaca@orix-login.kaust.edu.sa"   # ssh destination of the login node (key-based, BatchMode)
+runs_dir = "~/.vllm/runs"
+deploy_dir = "~/.vllm/deploy"              # recipes pushed with `sserve push`
+
+[profiles.orix-batch-h100]
+cluster = "orix"
+sbatch_args = ["--partition=batch-h100", "--qos=batch"]
+gres = "gpu:nvidia_h100_80gb_hbm3:{gpus}"
+time = "3:00:00"
+policy = "low-utilisation auto-cancel: 75% (1 h avg), 2 consecutive hours"
+
+[profiles.orix-freecycle-h100]
+cluster = "orix"
+sbatch_args = ["--partition=freecycle-h100", "--qos=freecycle"]
+gres = "gpu:nvidia_h100_80gb_hbm3:{gpus}"
+time = "3:00:00"
+policy = "preemptible (60 s grace, requeued); low-utilisation auto-cancel: 75%"
+
+[profiles.orix-batch-h200]
+cluster = "orix"
+sbatch_args = ["--partition=batch-h200", "--qos=batch"]
+gres = "gpu:nvidia_h200:{gpus}"
+time = "3:00:00"
+policy = "low-utilisation auto-cancel: 75% (1 h avg), 2 consecutive hours"
+
+[profiles.orix-freecycle-h200]
+cluster = "orix"
+sbatch_args = ["--partition=freecycle-h200", "--qos=freecycle"]
+gres = "gpu:nvidia_h200:{gpus}"
+time = "3:00:00"
+policy = "preemptible (60 s grace, requeued); low-utilisation auto-cancel: 75%"
+
+[profiles.orix-pi-caninim]
+cluster = "orix"
+sbatch_args = ["--partition=pi-caninim", "--qos=pi-caninim"]
+gres = "gpu:nvidia_h200:{gpus}"
+time = "3:00:00"
+opt_in = true                              # disabled until `sserved profile enable orix-pi-caninim`
+policy = "group-shared GPUs; low-utilisation auto-cancel: 50%"
+
+[models."Qwen/Qwen3-0.6B"]
+recipe = "qwen3-0.6b"
+gpus = 1
+profiles = ["orix-batch-h100", "orix-freecycle-h100"]
+max_model_len = 32768
+cpus_per_task = 8
+mem = "64G"
+startup_timeout_s = 900
+max_replicas = 1
+
+[models."ornith-ai/Ornith-1.5-122B"]
+recipe = "ornith-1.5-122b"                 # serve.sh must honour TENSOR_PARALLEL_SIZE for gpus = 2
+gpus = 2                                   # BF16 ~234 GB: 2 x H200 (no quantization)
+profiles = ["orix-batch-h200", "orix-freecycle-h200", "orix-pi-caninim"]
+max_model_len = 262144
+cpus_per_task = 32
+mem = "400G"
+startup_timeout_s = 2400                   # staging + load + KV cache + graph capture
+readiness_inference = true                 # one tool-call check before admission (not demand)
+max_replicas = 2
