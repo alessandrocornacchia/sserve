@@ -1,9 +1,10 @@
 # Implement an approved plan and open a draft PR.
 #
 #   label `ready` added ─► Claude follows the latest plan comment (plus the
-#        maintainers' later comments) on branch claude/issue-<n>, the workflow
-#        commits, pushes and opens a draft PR, and labels the issue
-#        `draft-complete`.
+#        maintainers' later comments) on branch claude/issue-<n>, testing it on
+#        a Docker SLURM cluster (tests/slurm/); the workflow reruns the smoke
+#        test, commits, pushes, opens a draft PR with the test result, and labels
+#        the issue `draft-complete`.
 #
 # Only people with triage access or above can add labels, so `ready` is the
 # approval gate. See docs/automation.md.
@@ -60,6 +61,9 @@ jobs:
           fi
           git checkout -B "$BRANCH"
 
+      - name: Start the Docker SLURM test cluster
+        run: tests/slurm/cluster.sh up | sed 's/^export //' >> "$GITHUB_ENV"
+
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -68,7 +72,7 @@ jobs:
           claude_args: >-
             --model claude-opus-5-5
             --max-turns 150
-            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(python3:*),Bash(./sserve:*),Bash(sh -n:*),Bash(bash -n:*),Bash(git diff:*),Bash(git status:*)"
+            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(python3:*),Bash(./sserve:*),Bash(sh -n:*),Bash(bash -n:*),Bash(git diff:*),Bash(git status:*),Bash(tests/slurm/smoke.sh),Bash(ssh sserve-slurm:*),Bash(curl:*)"
           prompt: |
             You are implementing issue #${{ github.event.issue.number }} of ${{ github.repository }}
             following a plan a maintainer has approved.
@@ -86,18 +90,34 @@ jobs:
             - Match the existing code: `sserve` is a single-file, standard-library
               Python CLI. Keep its style, comment density and naming.
             - Update README.md and docs/ where the plan says so, in their style.
-            - Verify what you can without a cluster: `python3 -m py_compile sserve`,
-              `./sserve -h`, `./sserve <command> -h`, `bash -n` on shell scripts.
+            - A throwaway SLURM cluster is running in Docker (tests/slurm/), with a
+              mock vLLM recipe, `mock-llm`. `./sserve -c test <command>` uses it
+              (SSERVE_CONFIG is set; always pass `-d` to `up`, which otherwise
+              blocks), and `ssh sserve-slurm <command>` runs on its login node.
+              Exercise your change there, then run `tests/slurm/smoke.sh`, the
+              end-to-end test; it must pass. When the change adds or alters
+              behaviour that this cluster can show, add a check for it to
+              smoke.sh in the same style (and a recipe under
+              tests/slurm/recipes/mock-llm/ if it needs one).
+            - Also run `python3 -m py_compile sserve` and `bash -n` on shell scripts.
             - Do not commit, push or create branches: the workflow does that.
 
             When done, write two files:
             1. ${{ env.WORK }}/pr-title.txt: one line, an imperative commit/PR title.
             2. ${{ env.WORK }}/pr-body.md: what changed and why, any deviations from
-               the plan, what you verified, and a short checklist of what the
-               maintainer should test on a real cluster. Do not mention the issue
+               the plan, what you verified on the test cluster, and a short checklist
+               of what the maintainer should still test on a real GPU cluster. Do not mention the issue
                number; the workflow links it.
 
+      # Run again after Claude, so the PR reports the final state of the code.
+      - name: Run the SLURM smoke test
+        id: smoke
+        continue-on-error: true
+        run: tests/slurm/smoke.sh 2>&1 | tee "$WORK/smoke.log"
+
       - name: Commit, push and open a draft PR
+        env:
+          SMOKE: ${{ steps.smoke.outcome }}
         run: |
           git add -A
           if git diff --cached --quiet; then
@@ -117,7 +137,23 @@ jobs:
           EOF
           git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$BRANCH"
 
-          { cat "$WORK/pr-body.md" 2>/dev/null; echo; echo "Closes #$ISSUE"; echo; echo "🤖 Generated with [Claude Code](https://claude.com/claude-code)"; } > "$WORK/pr.md"
+          if [ "$SMOKE" = success ]; then smoke="✅ passed"; else smoke="❌ **failed**"; fi
+          {
+            cat "$WORK/pr-body.md" 2>/dev/null
+            echo
+            echo "**SLURM smoke test** (\`tests/slurm/smoke.sh\` on the Docker cluster): $smoke"
+            echo
+            echo "<details><summary>Last lines of the output</summary>"
+            echo
+            echo '```'
+            tail -n 40 "$WORK/smoke.log" 2>/dev/null
+            echo '```'
+            echo "</details>"
+            echo
+            echo "Closes #$ISSUE"
+            echo
+            echo "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
+          } > "$WORK/pr.md"
           if gh pr view "$BRANCH" -R "$GITHUB_REPOSITORY" --json state --jq .state 2>/dev/null | grep -q OPEN; then
             gh pr edit "$BRANCH" -R "$GITHUB_REPOSITORY" --title "$title" --body-file "$WORK/pr.md"
           else

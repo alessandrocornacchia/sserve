@@ -1,0 +1,96 @@
+# A throwaway SLURM cluster for testing sserve, from the prebuilt images of
+# https://github.com/giovtorres/slurm-docker-cluster (one login node, one CPU
+# compute node). Started by cluster.sh, which also sets up SSH to it.
+#
+# Differences from upstream's compose file that sserve needs:
+# - the compute node answers to `c1` on the network, as SLURM calls it, so the
+#   login node can curl it and the ssh tunnel can reach it;
+# - only the login node (slurmctld) is published, on $SSERVE_SLURM_SSH_PORT,
+#   and its sshd runs without PAM (see sshd.conf).
+
+x-image: &image giovtorres/slurm-docker-cluster:26.05.5-3.0.2
+
+services:
+  mysql:
+    image: mariadb:12
+    hostname: mysql
+    environment:
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+      MYSQL_DATABASE: slurm_acct_db
+      MYSQL_USER: slurm
+      MYSQL_PASSWORD: password
+    networks: [slurm]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      retries: 30
+
+  slurmdbd:
+    image: *image
+    init: true
+    command: ["slurmdbd"]
+    hostname: slurmdbd
+    environment:
+      MYSQL_USER: slurm
+      MYSQL_PASSWORD: password
+    volumes:
+      - etc_munge:/etc/munge
+      - etc_slurm:/etc/slurm
+    depends_on:
+      mysql: {condition: service_healthy}
+    networks: [slurm]
+    healthcheck:
+      test: ["CMD-SHELL", "pidof slurmdbd"]
+      interval: 5s
+      retries: 30
+
+  slurmctld:
+    image: *image
+    init: true
+    command: ["slurmctld"]
+    hostname: slurmctld
+    privileged: true
+    environment:
+      SSH_ENABLE: "true"
+    volumes:
+      - etc_munge:/etc/munge
+      - etc_slurm:/etc/slurm
+      - jobdir:/data
+      - ${SSERVE_SLURM_KEYS:?set by cluster.sh}:/tmp/authorized_keys_host:ro
+      - ./sshd.conf:/etc/ssh/sshd_config.d/00-sserve.conf:ro
+    ports:
+      - "127.0.0.1:${SSERVE_SLURM_SSH_PORT:-3022}:22"
+    depends_on:
+      slurmdbd: {condition: service_healthy}
+    networks: [slurm]
+    healthcheck:
+      test: ["CMD-SHELL", "scontrol ping"]
+      interval: 5s
+      retries: 30
+
+  # Upstream's entrypoint names the node c<N> from the container name
+  # <project>-cpu-worker-<N>, so keep that service name.
+  cpu-worker:
+    image: *image
+    init: true
+    command: ["slurmd-cpu"]
+    privileged: true
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-sserve-slurm}
+    volumes:
+      - etc_munge:/etc/munge
+      - etc_slurm:/etc/slurm
+      - jobdir:/data
+    depends_on:
+      slurmctld: {condition: service_healthy}
+    networks:
+      slurm:
+        aliases: [c1]
+
+volumes:
+  etc_munge:
+  etc_slurm:
+  jobdir:
+
+networks:
+  slurm:
