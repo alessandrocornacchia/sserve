@@ -8,7 +8,8 @@ issue opened ──► claude-triage.yml ──► plan comment, label plan-prop
                                             │
                        maintainer reviews, comments, adds `ready`
                                             ▼
-             claude-implement.yml ──► branch claude/issue-<n>, draft PR,
+             claude-implement.yml ──► branch claude/issue-<n>, tested on a
+                                      Docker SLURM cluster, draft PR,
                                       label draft-complete
 ```
 
@@ -42,8 +43,11 @@ closes the issue. Re-adding `ready` redoes the implementation from the default
 branch and force-pushes the same branch, updating the PR. If a run fails, the
 workflow comments on the issue with a link to the logs and removes `ready`.
 
-Claude can't reach a cluster from CI. It checks that `sserve` compiles and its
-`-h` output works; the PR lists what to test on a real cluster.
+Claude can't reach a real cluster from CI. Instead the workflow starts the
+Docker SLURM cluster from [testing](testing.md), where Claude tries its change
+with a mock vLLM and extends `tests/slurm/smoke.sh`. The workflow then reruns the
+smoke test and puts the result in the PR (a failing test doesn't stop the PR),
+and the PR lists what to check on a real GPU cluster.
 
 ## Setup
 
@@ -53,4 +57,5 @@ Claude can't reach a cluster from CI. It checks that `sserve` compiles and its
    permissions → "Allow GitHub Actions to create and approve pull requests".
 
 PRs opened by the workflow don't trigger other workflows (a GitHub rule for
-`GITHUB_TOKEN`); the repo has no CI, so this doesn't matter today.
+`GITHUB_TOKEN`), so the SLURM test workflow doesn't run on them by itself;
+start it from the Actions tab ("Run workflow" on the PR's branch) if you need it.

@@ -1,0 +1,38 @@
+# End-to-end test of sserve against a SLURM cluster in Docker (tests/slurm/).
+#
+# PRs opened by claude-implement.yml don't trigger this (GitHub doesn't start
+# workflows for GITHUB_TOKEN pushes), so that workflow runs the test itself and
+# reports it in the PR; use "Run workflow" here to test such a branch again.
+
+name: SLURM test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Start the Docker SLURM cluster
+        run: tests/slurm/cluster.sh up | sed 's/^export //' >> "$GITHUB_ENV"
+
+      - name: Smoke test
+        run: tests/slurm/smoke.sh
+
+      - name: Cluster logs
+        if: failure()
+        run: docker compose -f tests/slurm/compose.yml logs --no-color --tail 200
+        env:
+          SSERVE_SLURM_KEYS: tests/slurm/.state/authorized_keys
+          COMPOSE_PROJECT_NAME: sserve-slurm
