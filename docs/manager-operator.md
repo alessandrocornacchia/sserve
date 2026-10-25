@@ -253,10 +253,9 @@ default is not a replacement for the persisted operator switch.
 
 ### Scaling and resource efficiency
 
-Read [how the manager adds and releases capacity](manager-scaling.md) for the
-reasons to add or release a model server, a worked example, and the limits an
-operator should check. Use the [decision reference](manager-scaling-reference.md)
-when tuning thresholds or checking exact conditions.
+Read the [scaling policy](manager-scaling.md) for its design principles, exact
+growth and shrink conditions, allocation limits, and resource-release behavior.
+The policy explains both the mechanisms and their rationale on the same page.
 
 ### Recovery and blocked deployments
 
