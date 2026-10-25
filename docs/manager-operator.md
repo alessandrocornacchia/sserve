@@ -251,6 +251,13 @@ prevents new submissions through it; verify what is already allocated before
 making assumptions about resource release. Editing its original `enabled`
 default is not a replacement for the persisted operator switch.
 
+### Scaling and resource efficiency
+
+Read [how the manager adds and releases capacity](manager-scaling.md) for the
+implemented scale-out and scale-in rules, defaults, warm period, draining,
+allocation limits and known gaps. The objective is useful GPU occupancy, but the
+current decisions use request-load proxies rather than measured GPU utilization.
+
 ### Recovery and blocked deployments
 
 - **Lost tunnel:** the manager repairs connectivity to the existing allocation

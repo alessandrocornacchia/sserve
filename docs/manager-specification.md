@@ -77,4 +77,6 @@ the test's own resources. Neither a passing configuration check nor a healthy
 host-only endpoint establishes that a real benchmark container can use a model.
 
 See the [client guide](manager.md), [operator guide](manager-operator.md) and
-[management overview](manager-overview.md).
+[management overview](manager-overview.md). The
+[current scaling policy](manager-scaling.md) documents the implemented decision
+rules separately from proposed changes and known defects.
