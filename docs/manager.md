@@ -148,9 +148,8 @@ and `--idle-timeout` request different limits in seconds, within the service's
 configured bounds.
 
 Use Ctrl-C to stop a wrapped command normally. After the last reservation ends,
-ready capacity can remain briefly for reuse before it is drained and released.
-Unused queued candidates should not remain waiting for work that no longer
-exists.
+ready model servers wait for the configured shutdown delay, then drain and their
+jobs are cancelled. Unused queued jobs are cancelled without that delay.
 
 ## Manual reservations
 

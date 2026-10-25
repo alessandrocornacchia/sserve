@@ -31,11 +31,11 @@ changes.
 | Capacity search | Race approved batch, preemptible and explicitly enabled PI profiles. Declare a winner only when usable; cancel only its surplus candidates. |
 | Recovery | Distinguish failed connectivity from failed allocation. Follow requeues and changed nodes; never infer termination from scheduler uncertainty alone. |
 | Ownership | Persist job identity and the full enabled profile set. Resolve ambiguous submission before retrying. Cancel only manager-owned work. |
-| Availability | Admit only ready backends; report temporary unavailability honestly when none can serve. Keep the client address stable across backend changes. |
-| Scaling | Add replicas for sustained capacity pressure, not arbitrary request errors or low GPU utilization. Use windows, cooldowns and explicit bounds. |
-| Resource release | Retire redundant replicas and unused reservations. Protect requests already in progress and bound draining. |
+| Availability | Route only to ready model servers; report temporary unavailability when none can serve. Keep the client address stable across model-server changes. |
+| Scaling | Add model servers for sustained capacity pressure, not arbitrary request errors or low GPU utilization. Use windows, cooldowns and explicit bounds. |
+| Resource release | Stop unused model servers and release unused reservations. Protect requests already in progress and bound draining. |
 | Policy | Stop on utilization-policy cancellation or persistent misconfiguration. Do not create artificial traffic or repeatedly resubmit to bypass site rules. |
-| Operations | Single controller, persistent state, supervised child processes, private credentials and safe network defaults. |
+| Operations | Single manager, persistent state, supervised child processes, private credentials and safe network defaults. |
 
 ## Lessons carried forward
 
@@ -45,8 +45,8 @@ Past benchmark operation exposed several failures this prototype must avoid:
   connectivity before requesting another allocation.
 - An allocated GPU is not necessarily a ready model server. Loading, cache
   allocation, graph capture and tool-parser checks can still fail.
-- Restarting a controller must not silently forget enabled compute options.
-- Extra replicas can divide already intermittent demand and worsen utilization.
+- Restarting a manager must not silently forget enabled compute options.
+- Extra model servers can divide already intermittent demand and worsen utilization.
 - Process existence is not endpoint health; exited child processes must be
   collected rather than mistaken for useful capacity.
 - Cluster utilization rules are not vLLM queue or cache metrics. Measure and
@@ -79,4 +79,4 @@ host-only endpoint establishes that a real benchmark container can use a model.
 See the [client guide](manager.md), [operator guide](manager-operator.md) and
 [management overview](manager-overview.md). The
 [current scaling policy](manager-scaling.md) documents the implemented decision
-rules separately from proposed changes and known defects.
+rules and their rationale.

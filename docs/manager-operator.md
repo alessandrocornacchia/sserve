@@ -22,8 +22,8 @@ On **the manager machine**:
   and credentials that remain usable during an unattended run.
 - Network access to the clusters. For ROCS, arrange its VPN separately; the
   manager does not start VPNs or change SSH configuration.
-- A persistent private state directory. Run only one controller per state
-  directory and do not copy its state to a second active controller.
+- A persistent private state directory. Run only one manager per state
+  directory and do not copy its state to a second active manager.
 
 On **each configured compute cluster**:
 
@@ -77,9 +77,9 @@ The configuration has three related parts:
 - **Model:** the Hugging Face identifier clients request, its recipe, GPU count,
   context limit and the profiles it may use.
 
-Different profiles can race to serve the same replica. Put all permitted race
+Different profiles can race to start the same model server. Put all permitted race
 candidates in the model's `profiles` list. The first candidate that becomes
-healthy wins; only its unused siblings are cancelled. Extra replicas are a
+healthy wins; only its unused siblings are cancelled. Extra model servers are a
 separate decision based on sustained demand.
 
 The following settings illustrate a conservative starting point:
@@ -123,7 +123,7 @@ recipe must honor:
 The manager supplies these variables; it does not rewrite hardcoded flags in an
 existing recipe. In particular, a recipe with a fixed tensor-parallel size must
 not advertise arbitrary GPU overrides. Clients cannot change model precision or
-enable remote model code through the lease interface.
+enable remote model code through the reservation interface.
 
 The supplied small-model recipe is
 [`recipes/orix/qwen3-0.6b/serve.sh`](../recipes/orix/qwen3-0.6b/serve.sh).
@@ -235,9 +235,10 @@ uv run sserved -c ~/.config/sserve/sserved.toml status
 uv run sserved -c ~/.config/sserve/sserved.toml profile list
 ```
 
-The local status command shows deployment identifiers, target replicas, owned
-jobs, queue reasons and blocked conditions. Clients see their own reservations
-through `sserve lease status`; an administrator token can inspect all clients.
+The local status command shows deployment identifiers, target model-server
+counts, owned jobs, queue reasons and blocked conditions. Clients see their own
+reservations through `sserve lease status`; an administrator token can inspect
+all clients.
 
 Profile switches persist in state across restarts:
 
@@ -302,9 +303,9 @@ python3 ./sserve lease release LEASE_ID
 uv run sserved -c ~/.config/sserve/sserved.toml status
 ```
 
-Replace `LEASE_ID` with the reservation being retired. Releasing one does not
-release other clients' reservations. Wait for the configured linger and bounded
-drain, and verify that owned jobs have ended before stopping the daemon.
+Replace `LEASE_ID` with the reservation to release. Releasing one does not
+release other clients' reservations. Wait for the configured shutdown delay and
+bounded drain, and verify that owned jobs have ended before stopping the manager.
 
 Stopping and restarting the daemon with the **same state directory** is a
 recovery operation: it closes local connections and reconciles the jobs it
@@ -313,11 +314,10 @@ benchmark finalizers. Do not delete state while owned jobs remain allocated.
 
 ### Change launch configuration safely
 
-Retire affected reservations and jobs before removing a model, cluster or
-profile, or changing an active model's launch settings. Startup refuses
-incompatible configuration changes while the old work is still tracked. If that
-happens, restore the previous configuration, start the manager and retire the
-affected work normally; do not delete its state to silence the check.
+Release affected reservations and verify their jobs have ended before changing
+active model, cluster or profile settings. If startup rejects a change, restore
+the previous configuration, start the manager and complete cleanup; do not
+delete its state to bypass the check.
 
 Persisted profile enable/disable switches are separate from launch settings.
 They are the normal way to control which existing profiles accept new work.
@@ -340,7 +340,7 @@ cluster.
 - Model defaults are operator-managed. There is no automatic model sizing,
   quantization, arbitrary launch-code execution or promise that every Hugging
   Face model works.
-- One controller and local persistent state are not a highly available service.
+- One manager and local persistent state are not a highly available service.
   Back up state securely and coordinate maintenance with clients.
 - Short walltimes can cause gaps when replacement capacity starts too late.
   Autoscaling and replacement are bounded by the configured scheduler and GPU
@@ -360,7 +360,7 @@ the real LiteLLM integration. Passing these tests is not evidence that a given
 KAUST profile, runtime, model or network path has been validated on live GPUs.
 
 On 25 October 2026, the final source passed **76 tests**. Coverage includes
-independent clients, lease expiry and inactivity, partition races, uncertain
+independent clients, reservation expiry and inactivity, partition races, uncertain
 scheduler responses, requeue relocation, replacement, scaling, policy stops,
 stream interruption, authentication, container addressing and process cleanup.
 The scheduler and inference backends in that suite are simulated; LiteLLM is

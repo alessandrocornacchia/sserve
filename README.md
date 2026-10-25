@@ -1,11 +1,11 @@
 # sserve
 
-**Run a vLLM server as a SLURM job and use it from your laptop as an
+**Run a vLLM model server as a SLURM job and use it from your laptop as an
 OpenAI-compatible endpoint.**
 
 sserve is a small command-line utility. Given an SSH-reachable SLURM login node
 and a recipe (an `sbatch` script that starts vLLM), it submits the job, waits
-until the server is healthy, and tunnels it to `localhost` with a per-run API
+until the model server is healthy, and tunnels it to `localhost` with a per-run API
 key. Any OpenAI client can then use it.
 
 sserve does not write recipes for you. It runs the ones you give it. You can
@@ -31,7 +31,7 @@ $ eval "$(sserve env my-model)"     # OPENAI_BASE_URL, OPENAI_API_KEY, SSERVE_MO
 
 - Submits the recipe, waits for `/health`, opens an `ssh -L` tunnel through the
   login node, and checks it with the key.
-- Gives every run a fresh API key, so other cluster users can't reach your server.
+- Gives every run a fresh API key, so other cluster users can't reach your model server.
 - Reopens the tunnel after a laptop sleep. Running `up` from another
   machine attaches to the running job.
 - Ctrl-C or `sserve down` cancels the job.
