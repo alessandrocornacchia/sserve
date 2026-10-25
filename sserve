@@ -202,7 +202,7 @@ for f in "$d"/*/*.sbatch; do
     [ -e "$f" ] || continue
     desc=$(grep -m1 '^# sserve:' "$f" | sed 's/^# sserve:[[:space:]]*//')
     sum=$(sha256sum "$f" | cut -c1-64)
-    printf '%s\t%s\t%s\t%s\n' "$(basename "$(dirname "$f")")" "$(basename "$f" .sbatch)" "$sum" "$desc"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$(basename "$(dirname "$f")")" "$(basename "$f" .sbatch)" "$sum" "$f" "$desc"
 done
 '''
 
@@ -493,14 +493,14 @@ def verify(dep: Deployment) -> None:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
-def local_catalogue(cl: Cluster) -> dict[tuple[str, str], tuple[str, str]]:
-    """(label, recipe) -> (sha256, description) for recipes/<cluster>/<label>/*.sbatch."""
+def local_catalogue(cl: Cluster) -> dict[tuple[str, str], tuple[str, str, str]]:
+    """(label, recipe) -> (sha256, description, path) for recipes/<cluster>/<label>/*.sbatch."""
     out = {}
     for f in sorted(cl.local_recipes.glob("*/*.sbatch")):
         text = f.read_bytes()
         desc = next((ln[len("# sserve:"):].strip() for ln in text.decode(errors="replace").splitlines()
                      if ln.startswith("# sserve:")), "")
-        out[(f.parent.name, f.stem)] = (hashlib.sha256(text).hexdigest(), desc)
+        out[(f.parent.name, f.stem)] = (hashlib.sha256(text).hexdigest(), desc, str(f))
     return out
 
 
@@ -508,30 +508,30 @@ def cmd_ls(cl: Cluster, a: argparse.Namespace) -> None:
     remote_rows = {}
     for row in remote(cl, LIST_SH, cl.deploy_dir).splitlines():
         if row.strip():
-            label, recipe, digest, desc = (row.split("\t") + [""])[:4]
-            remote_rows[(label, recipe)] = (digest, desc)
+            label, recipe, digest, path, desc = (row.split("\t") + [""])[:5]
+            remote_rows[(label, recipe)] = (digest, desc, f"{cl.host}:{path}")
     local = local_catalogue(cl)
     if not remote_rows and not local:
         print(f"no recipes on {cl.host}:{cl.deploy_dir} nor in {cl.local_recipes}")
         return
 
     def sync(key):
-        if not local:
-            return ""                   # no local catalogue for this cluster: nothing to compare
         if key not in local:
             return "remote only"
         if key not in remote_rows:
             return "not pushed"
-        return "" if local[key][0] == remote_rows[key][0] else "differs"
+        return "ok" if local[key][0] == remote_rows[key][0] else "differs"
 
     keys = sorted(set(remote_rows) | set(local), key=lambda k: (k[0], k[1] != DEFAULT_RECIPE, k[1]))
-    names = {k: k[0] if k[1] == DEFAULT_RECIPE else f"{k[0]}:{k[1]}" for k in keys}
-    width = max(map(len, names.values()))
-    for k in keys:
-        desc = (remote_rows.get(k) or local[k])[1]
-        flag = sync(k)
-        print(f"{names[k]:<{width}}  {f'[{flag}] ' if flag else ''}{desc}")
-    flags = {sync(k) for k in keys}
+    cols = {"RECIPE": [k[0] if k[1] == DEFAULT_RECIPE else f"{k[0]}:{k[1]}" for k in keys],
+            "TARGET": [cl.name] * len(keys)}
+    cols["DESCRIPTION"] = [(remote_rows.get(k) or local[k])[1] for k in keys]
+    if a.wide:                          # the recipe `up` would run (host:path), or the local file if not pushed
+        cols["PATH"] = [(remote_rows.get(k) or local[k])[2] for k in keys]
+    widths = [max(len(h), *map(len, v)) for h, v in cols.items()]
+    for row in [list(cols), *zip(*cols.values())]:
+        print("  ".join(f"{c:<{w}}" for c, w in zip(row, widths)).rstrip())
+    flags = {sync(k) for k in keys} if local else set()   # no local catalogue: nothing to compare
     if flags & {"not pushed", "differs", "remote only"}:
         sys.stdout.flush()
         print(file=sys.stderr)
@@ -764,8 +764,10 @@ def ask(question: str) -> str:
     return sys.stdin.readline().strip().lower()
 
 
-def show_diff(cl: Cluster, rels: list[str]) -> None:
-    theirs = fetch(cl, rels)
+def show_diff(cl: Cluster, rels: list[str], new: list[str] = ()) -> None:
+    """Diff the cluster's copy of `rels` against the local one; `new` files diff against nothing."""
+    theirs = fetch(cl, rels) if rels else {}
+    rels = [*rels, *new]
     for rel in rels:
         ours = (cl.local_recipes / rel).read_text(errors="replace").splitlines(keepends=True)
         old = theirs.get(rel, (b"", 0))[0].decode(errors="replace").splitlines(keepends=True)
@@ -797,7 +799,7 @@ def check_recipes(cl: Cluster, label: str, a: argparse.Namespace) -> None:
             warn("no terminal to ask: deploying the cluster's copy (--push uploads the local one)")
             return
         while (answer := ask("push the local copy over the cluster's and deploy it? [y/N/d=diff]")) == "d":
-            show_diff(cl, changed)
+            show_diff(cl, changed, new)
         if answer not in ("y", "yes"):
             log("deploying the cluster's copy")
             return
@@ -922,7 +924,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("-c", "--cluster", help="cluster name from the config, or a bare ssh host")
     sub = ap.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
 
-    sub.add_parser("ls", help="list deployable models and recipes")
+    ls = sub.add_parser("ls", help="list deployable models and recipes")
+    ls.add_argument("-w", "--wide", action="store_true",
+                    help="also show each recipe's path (host:path on the cluster, or the local file if not pushed)")
 
     ct = sub.add_parser("cat", help="show a recipe and where it lives",
                         description="Show a recipe and its path: the local copy in recipes/<cluster>/ "
