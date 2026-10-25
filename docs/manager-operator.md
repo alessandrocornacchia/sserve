@@ -254,9 +254,9 @@ default is not a replacement for the persisted operator switch.
 ### Scaling and resource efficiency
 
 Read [how the manager adds and releases capacity](manager-scaling.md) for the
-implemented scale-out and scale-in rules, defaults, warm period, draining,
-allocation limits and known gaps. The objective is useful GPU occupancy, but the
-current decisions use request-load proxies rather than measured GPU utilization.
+reasons to add or release a model server, a worked example, and the limits an
+operator should check. Use the [decision reference](manager-scaling-reference.md)
+when tuning thresholds or checking exact conditions.
 
 ### Recovery and blocked deployments
 
