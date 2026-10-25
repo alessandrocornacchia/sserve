@@ -126,4 +126,5 @@ access, quotas and which recipe to pick.
 - [How it works](docs/how-it-works.md): architecture, where state and keys live, limitations
 - [Configuration](docs/configuration.md): `config.toml`, multiple clusters, environment variables
 - [Recipes](docs/recipes.md): the recipe contract, `push`/`ls`, and how to write one
+- [Testing](docs/testing.md): the Docker SLURM cluster and end-to-end test
 - [Issue automation](docs/automation.md): how Claude plans and implements issues in this repo

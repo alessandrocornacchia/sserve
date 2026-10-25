@@ -97,9 +97,11 @@ jobs:
                - **Plan**: numbered steps naming the files and functions to change,
                  and what changes in each (behaviour, CLI flags, output).
                - **Docs**: which docs/README lines change.
-               - **Verification**: how to check it without a cluster
-                 (e.g. `python3 -m py_compile sserve`, `./sserve <cmd> -h`) and
-                 what the maintainer should try on a real cluster.
+               - **Verification**: what to check on the Docker SLURM test cluster
+                 (tests/slurm/: a CPU-only cluster with a mock vLLM recipe, and the
+                 end-to-end test smoke.sh, which the implementation must extend for
+                 new behaviour), and what the maintainer should try on a real GPU
+                 cluster.
                - **Open questions**: only blocking ones as described above, or "None".
                Do not start the file with a heading; it goes into an issue comment.
 
