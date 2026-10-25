@@ -42,13 +42,36 @@ deepseek-v4-flash:8xh200  orix    hand-made on the cluster
 
 It lists both the recipes on the cluster and the local ones in
 `recipes/<cluster>/`. If a local recipe isn't pushed yet, or differs from the
-cluster's copy, `ls` ends with a reminder to run `sserve push`. Only `*.sbatch`
+cluster's copy, `ls` ends with a reminder to run `sserve push` (and `sserve pull`
+for recipes that exist only on the cluster, or differ). Only `*.sbatch`
 files are compared, so run `sserve push` yourself after editing a helper such
 as `serve.sh`.
 
 `sserve ls --wide` (`-w`) adds a `PATH` column on the right: `host:/path/to/recipe.sbatch`
 for the copy on the cluster (the one `sserve up` runs), or the local file for
 a recipe that isn't pushed yet.
+
+`sserve pull` goes the other way: it copies the cluster's catalogue (or the
+labels you name) into `recipes/<cluster>/`, e.g. to keep a recipe that was
+hand-made on the cluster. `sserve sync` does the same and also deletes local
+files the cluster's copy lacks, so each label ends up identical to the
+cluster's; labels that exist only locally are left alone. Both list the changes
+(`+` new, `~` overwritten, `-` deleted) and ask before overwriting or deleting
+anything (`-y` skips the question).
+
+Before submitting, `sserve up` compares the label's local directory, helpers
+included, with the cluster's. If a local file is new or different, it lists the
+files and asks whether to push the local copy and deploy it (`d` shows a diff).
+Answering no deploys the cluster's copy as it is. `--push` pushes without
+asking, and `--no-check` skips the comparison. Without a terminal to ask on, it
+deploys the cluster's copy. Attaching to a running job skips the check.
+
+`sserve cat <label>[:<recipe>]` shows a recipe and its path. It reads the local
+copy in `recipes/<cluster>/` when there is one, and otherwise the cluster's
+(`--remote` always reads the cluster's). On a terminal, a local recipe opens in
+a file manager when one is installed: `spf` on Linux opens the recipe's
+directory, `yazi` on macOS opens on the file. `--plain`, or piping the output,
+prints the file instead, with a `==> path <==` header on stderr.
 
 ## Writing a recipe
 

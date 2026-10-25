@@ -96,6 +96,7 @@ print(r.choices[0].message.content)
 | | |
 |---|---|
 | `sserve ls [-w]` | list the recipes on the cluster (`-w`: with their paths) |
+| `sserve cat <model>[:<recipe>]` | show a recipe and its path (opens in `spf`/`yazi` if installed; `--plain` to print) |
 | `sserve up <model>[:<recipe>]` | launch a model (or attach to it if it's already running) and connect |
 | `sserve up <model> -d` | the same, but return once ready and leave it running |
 | `sserve env <model>` | print the environment variables for your client |
@@ -103,6 +104,8 @@ print(r.choices[0].message.content)
 | `sserve logs <model> [-f]` | show the job's logs |
 | `sserve down <model>` | stop the job and close the connection |
 | `sserve push` | upload your local recipes to the cluster |
+| `sserve pull [<model>]` | download the cluster's recipes into your local copy |
+| `sserve sync [<model>]` | like `pull`, and delete local files the cluster doesn't have |
 | `sserve config show` | show the install location, config file and resolved clusters |
 
 `-c <cluster>` picks a cluster from the config (or any SSH host). Without it,
