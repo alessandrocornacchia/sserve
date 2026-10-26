@@ -31,6 +31,7 @@ Commands (see `sserve <command> -h`):
     pull     download the cluster's catalogue into recipes/<cluster>/
     sync     like pull, and delete local files the cluster's copy lacks
     config   show where sserve is installed and the configuration it resolved
+    lease    reserve a model on an sserved manager over HTTP (no cluster access needed)
 """
 
 from __future__ import annotations
@@ -912,6 +913,11 @@ def cmd_config(a: argparse.Namespace) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["lease"]:  # client of an sserved manager; owns its own `--` handling
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import sserve_client
+        return sserve_client.cli(argv[1:])
+
     # Everything after a bare "--" goes to sbatch verbatim.
     sbatch_args: list[str] = []
     if "--" in argv:
@@ -986,6 +992,7 @@ def main(argv: list[str]) -> int:
         pl.add_argument("labels", nargs="*", metavar="LABEL")
         pl.add_argument("-y", "--yes", action="store_true", help="overwrite or delete local files without asking")
 
+    sub.add_parser("lease", help="reserve a model on an sserved manager (see `sserve lease -h`)", add_help=False)
     cf = sub.add_parser("config", help="show install location and resolved configuration")
     cf.add_argument("action", nargs="?", choices=["show"], default="show")
 

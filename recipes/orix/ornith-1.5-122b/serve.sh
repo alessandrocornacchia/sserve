@@ -26,7 +26,7 @@ exec vllm serve ornith-ai/Ornith-1.5-122B \
     --served-model-name ornith-ai/Ornith-1.5-122B \
     --host 0.0.0.0 \
     --port "$VLLM_PORT" \
-    --tensor-parallel-size 4 \
+    --tensor-parallel-size "${TENSOR_PARALLEL_SIZE:-4}" \
     --max-model-len "${MAX_MODEL_LEN:-262144}" \
     --gpu-memory-utilization "${GPU_MEM_UTIL:-0.90}" \
     --enable-prefix-caching \
