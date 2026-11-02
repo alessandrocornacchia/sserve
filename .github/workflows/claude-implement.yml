@@ -139,14 +139,14 @@ jobs:
 
           if [ "$SMOKE" = success ]; then smoke="✅ passed"; else smoke="❌ **failed**"; fi
           {
-            cat "$WORK/pr-body.md" 2>/dev/null
+            cat "$WORK/pr-body.md" 2>/dev/null || echo "_Claude did not write a PR description._"
             echo
             echo "**SLURM smoke test** (\`tests/slurm/smoke.sh\` on the Docker cluster): $smoke"
             echo
             echo "<details><summary>Last lines of the output</summary>"
             echo
             echo '```'
-            tail -n 40 "$WORK/smoke.log" 2>/dev/null
+            tail -n 40 "$WORK/smoke.log" 2>/dev/null || true
             echo '```'
             echo "</details>"
             echo
