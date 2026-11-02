@@ -59,7 +59,7 @@ A chat endpoint is often idle, so:
 - run `sserve down` as soon as you're done;
 - the recipes ask for 4 hours; pass `-- --time=...` only for runs that keep the
   GPUs busy;
-- before starting a second replica, make sure there is enough traffic to keep
+- before starting a second model server, make sure there is enough traffic to keep
   both busy.
 
 ## DeepSeek-V4-Flash on H100 and H200

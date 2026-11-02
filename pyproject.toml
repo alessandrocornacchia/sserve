@@ -1,0 +1,28 @@
+[project]
+name = "sserved"
+version = "0.1.0"
+description = "Opportunistic inference manager for sserve: leases, SLURM reconciliation, one LiteLLM routing layer"
+requires-python = ">=3.11"
+dependencies = [
+    "litellm[proxy]==1.106.2",   # pinned: routing semantics are tested against this version
+    "starlette",
+    "uvicorn",
+    "httpx",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "openai", "anthropic"]
+
+[project.scripts]
+sserved = "sserved.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["sserved"]
+py-modules = ["sserve_client"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

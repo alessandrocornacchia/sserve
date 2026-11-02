@@ -74,5 +74,5 @@ On your machine:
   preemptible job that SLURM requeued. After a requeue onto another node,
   re-running `up` can keep the old tunnel. With `-d`, nothing tells you the job
   was preempted.
-- **Only one replica per model.** You can't run two jobs of the same label at
+- **Only one model server per model.** You can't run two jobs of the same label at
   once, for example behind a load balancer.
